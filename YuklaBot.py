@@ -1,11 +1,10 @@
-import imageio_ffmpeg
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 import os
 import asyncio
 import logging
 import sqlite3
 import yt_dlp
 import uuid
+import imageio_ffmpeg
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,6 +14,13 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest
 
+# --- LOGGING ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # --- SOZLAMALAR ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -23,18 +29,16 @@ CHANNEL_ID = "@MafiaRoyale2"
 DOWNLOAD_DIR = "downloads"
 INSTAGRAM_COOKIES = "instagram_cookies.txt"
 
-# FFmpeg yo'li (Agar Windowsda bo'lsangiz va Pathga qo'shmagan bo'lsangiz, bu yerga yo'lini yozing)
-FFMPEG_PATH = "ffmpeg" 
+# FFmpeg yo'lini imageio orqali avtomatik aniqlash (Railway uchun muhim)
+try:
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+    logger.info(f"FFmpeg aniqlandi: {FFMPEG_PATH}")
+except Exception as e:
+    FFMPEG_PATH = "ffmpeg"
+    logger.error(f"FFmpeg aniqlashda xato: {e}")
 
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
-
-# --- LOGGING ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
 
 # --- BAZA BILAN ISHLASH ---
 def get_db_connection():
@@ -56,7 +60,7 @@ async def is_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=update.effective_user.id)
         return member.status not in ['left', 'kicked']
     except Exception as e:
-        logger.warning(f"Obuna tekshirishda xato (Bot admin bo'lmasligi mumkin): {e}")
+        logger.warning(f"Obuna tekshirishda xato: {e}")
         return True 
 
 # --- ASOSIY LOGIKA ---
@@ -138,11 +142,12 @@ class InstagramDownloader:
 
         status_msg = await update.message.reply_text("⚡️ <b>Tahlil qilinmoqda...</b>", parse_mode=ParseMode.HTML)
         file_id = str(uuid.uuid4())
-        file_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
+        # Extensionni yt-dlp o'zi belgilashi uchun shablon
+        file_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
 
         ydl_opts = {
             'format': 'bestvideo+bestaudio/best',
-            'outtmpl': file_path,
+            'outtmpl': file_template,
             'quiet': True,
             'no_warnings': True,
             'ffmpeg_location': FFMPEG_PATH,
@@ -156,14 +161,15 @@ class InstagramDownloader:
             loop = asyncio.get_running_loop()
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-                actual_filename = ydl.prepare_filename(info).replace(".%(ext)s", ".mp4")
-                # Ba'zan extension o'zgarib ketishi mumkin
-                if not os.path.exists(actual_filename):
-                    actual_filename = actual_filename.rsplit('.', 1)[0] + ".mp4"
+                # Yuklangan faylning haqiqiy nomini olish
+                downloaded_file = ydl.prepare_filename(info)
+                # Agar merge bo'lsa, nom o'zgarishi mumkin (.mp4 ga)
+                if not os.path.exists(downloaded_file):
+                    downloaded_file = downloaded_file.rsplit('.', 1)[0] + ".mp4"
 
             await status_msg.edit_text("📤 <b>Yuborilmoqda...</b>", parse_mode=ParseMode.HTML)
             
-            with open(actual_filename, 'rb') as video:
+            with open(downloaded_file, 'rb') as video:
                 await context.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=video,
@@ -173,16 +179,14 @@ class InstagramDownloader:
             await status_msg.delete()
 
         except Exception as e:
-            logger.error(f"Xatolik: {e}")
-            error_text = "❌ <b>Xatolik yuz berdi!</b>\n"
+            logger.error(f"Xatolik yuz berdi: {e}")
+            error_msg = "❌ <b>Xatolik!</b> Video yopiq profildan bo'lishi yoki link noto'g'ri."
             if "ffmpeg" in str(e).lower():
-                error_text += "Serverda FFmpeg o'rnatilmagan."
-            else:
-                error_text += "Video yopiq profildan bo'lishi yoki link xato bo'lishi mumkin."
-            await status_msg.edit_text(error_text, parse_mode=ParseMode.HTML)
+                error_msg = "❌ <b>Tizim xatosi:</b> FFmpeg muammosi."
+            await status_msg.edit_text(error_msg, parse_mode=ParseMode.HTML)
         
         finally:
-            # Fayllarni tozalash
+            # Vaqtinchalik fayllarni tozalash
             for f in os.listdir(DOWNLOAD_DIR):
                 if file_id in f:
                     try: os.remove(os.path.join(DOWNLOAD_DIR, f))
