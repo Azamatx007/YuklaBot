@@ -8,8 +8,6 @@ import imageio_ffmpeg
 import requests
 import time
 import hashlib
-import tempfile
-import shutil
 from datetime import datetime, timedelta
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
@@ -22,20 +20,10 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
-# ====================== OPENAI (YANGI VA ESKI VERSIYALARGA MOS) ======================
 try:
     import openai
-    if hasattr(openai, 'OpenAI'):  # v1.x
-        openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        AI_ACTIVE = "openai_new"
-    else:  # v0.x
-        openai.api_key = os.getenv("OPENAI_API_KEY")
-        openai_client = None
-        AI_ACTIVE = "openai_old"
 except ImportError:
     openai = None
-    openai_client = None
-    AI_ACTIVE = "pollinations"
 
 # ====================== LOGGING & ENV ======================
 logging.basicConfig(
@@ -52,14 +40,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 DOWNLOAD_DIR = "downloads"
 BOT_NAME = "🌟 Zo'r Ekan Bot"
 
-if not OPENAI_API_KEY:
+if OPENAI_API_KEY and openai:
+    openai.api_key = OPENAI_API_KEY
+    AI_ACTIVE = "openai"
+else:
     AI_ACTIVE = "pollinations"
-    logger.warning("OpenAI API kaliti yo'q. Pollinations ishlatiladi.")
+    logger.warning("OpenAI API key topilmadi. Pollinations (bepul) ishlatiladi.")
 
-# Instagram cookies fayli yo'li (loyiha papkasida)
-INSTAGRAM_COOKIES_FILE = "instagram_cookies.txt"
-
-# FFmpeg
 try:
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
@@ -73,7 +60,7 @@ db_lock = asyncio.Lock()
 
 # ====================== DATABASE ======================
 def get_db_connection():
-    conn = sqlite3.connect("users.db", check_same_thread=False, timeout=10)
+    conn = sqlite3.connect("users.db", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -193,6 +180,7 @@ def is_user_premium(user_id: int) -> bool:
             try:
                 expire = datetime.fromisoformat(row['premium_expire'])
                 if expire < datetime.now():
+                    # Premium muddati tugagan – orqa planda yangilash
                     async def expire_premium():
                         async with db_lock:
                             c = get_db_connection()
@@ -272,7 +260,7 @@ async def set_cache(prompt: str, response: str):
         conn.commit()
         conn.close()
 
-# ====================== AI GENERATSIYA (OPENAI + POLLINATIONS) ======================
+# ====================== AI GENERATSIYA ======================
 async def ai_text(prompt: str, system: str = None, use_cache: bool = True) -> str:
     cache_key = f"{system}||{prompt}" if system else prompt
     if use_cache:
@@ -280,37 +268,16 @@ async def ai_text(prompt: str, system: str = None, use_cache: bool = True) -> st
         if cached: return cached
 
     result = None
-    # OpenAI (yangi yoki eski)
-    if AI_ACTIVE == "openai_new" and openai_client:
+    if AI_ACTIVE == "openai" and openai:
         try:
             messages = []
             if system: messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
-            resp = openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1000
-            )
+            resp = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages, temperature=0.7, max_tokens=1000)
             result = resp.choices[0].message.content.strip()
         except Exception as e:
-            logger.error(f"OpenAI (new) text error: {e}")
-    elif AI_ACTIVE == "openai_old" and openai:
-        try:
-            messages = []
-            if system: messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
-            resp = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1000
-            )
-            result = resp.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error(f"OpenAI (old) text error: {e}")
+            logger.error(f"OpenAI text error: {e}")
 
-    # Fallback: Pollinations
     if not result:
         full = f"{system}\n\n{prompt}" if system else prompt
         try:
@@ -318,8 +285,7 @@ async def ai_text(prompt: str, system: str = None, use_cache: bool = True) -> st
             r = requests.get(url, timeout=60)
             if r.status_code == 200:
                 result = r.text.strip()
-        except Exception as e:
-            logger.error(f"Pollinations text error: {e}")
+        except: pass
 
     if not result:
         result = "Xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring."
@@ -329,33 +295,21 @@ async def ai_text(prompt: str, system: str = None, use_cache: bool = True) -> st
     return result
 
 def ai_image(prompt: str) -> bytes | None:
-    # OpenAI rasm generatsiyasi
-    if AI_ACTIVE == "openai_new" and openai_client:
-        try:
-            resp = openai_client.images.generate(prompt=prompt, n=1, size="1024x1024")
-            url = resp.data[0].url
-            img_data = requests.get(url, timeout=30).content
-            return img_data
-        except Exception as e:
-            logger.error(f"OpenAI (new) image error: {e}")
-    elif AI_ACTIVE == "openai_old" and openai:
+    if AI_ACTIVE == "openai" and openai:
         try:
             resp = openai.Image.create(prompt=prompt, n=1, size="1024x1024")
             url = resp['data'][0]['url']
             img_data = requests.get(url, timeout=30).content
             return img_data
         except Exception as e:
-            logger.error(f"OpenAI (old) image error: {e}")
+            logger.error(f"OpenAI image error: {e}")
 
-    # Fallback: Pollinations
     try:
         url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
         r = requests.get(url, timeout=120)
         if r.status_code == 200:
             return r.content
-    except Exception as e:
-        logger.error(f"Pollinations image error: {e}")
-
+    except: pass
     return None
 
 # ====================== RASMGA ISHLOV ======================
@@ -427,18 +381,16 @@ class InstagramDownloader:
         return True
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Callback orqali kirganda message mavjud bo'lmasligi mumkin, shuning uchun tekshiramiz
         if update.callback_query:
             query = update.callback_query
             effective_user = query.from_user
+            chat_id = query.message.chat.id
             message = query.message
-            if not message:
-                await query.answer("Xabar topilmadi.", show_alert=True)
-                return
-            chat_id = message.chat.id
         else:
             effective_user = update.effective_user
-            message = update.message
             chat_id = update.effective_chat.id
+            message = update.message
 
         user = effective_user
         user_id = user.id
@@ -452,6 +404,7 @@ class InstagramDownloader:
 
         now = datetime.now().isoformat()
 
+        # Foydalanuvchini bazaga qo'shish / yangilash
         async with db_lock:
             conn = get_db_connection()
             existing = conn.execute("SELECT user_id, referrer_id FROM users WHERE user_id=?", (user_id,)).fetchone()
@@ -462,11 +415,13 @@ class InstagramDownloader:
                              (user_id, user.username, user.first_name, now, referrer_id))
                 conn.commit()
             else:
+                # mavjud foydalanuvchi ma'lumotlarini yangilash
                 conn.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?",
                              (user.username, user.first_name, user_id))
                 conn.commit()
             conn.close()
 
+        # Yangi foydalanuvchi va referrer mavjud bo'lsa, referrerga bonus berish
         if is_new and referrer_id and referrer_id != user_id:
             await add_premium_days(referrer_id, 1)
             try:
@@ -477,6 +432,7 @@ class InstagramDownloader:
             except Exception as e:
                 logger.warning(f"Referrer {referrer_id} ga xabar yuborib bo'lmadi: {e}")
 
+        # Majburiy obuna tekshiruvi
         if not await self.check_subscription(update, context):
             channels = get_force_channels()
             text = "👋 <b>Botdan foydalanish uchun quyidagi kanallarga a'zo bo'ling:</b>\n\n"
@@ -617,86 +573,44 @@ class InstagramDownloader:
         result = await ai_text(f"Qisqa matn: {short_text}", "Qisqa fikrni 200-300 so'zga kengaytir. O'zbek tilida.")
         await status.edit_text(f"📝 Kengaytirilgan matn:\n\n{result}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML)
 
-    # ---------- INSTAGRAM YUKLASH (COOKIES FILE BILAN) ----------
+    # ---------- INSTAGRAM YUKLASH ----------
     async def download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
         user_id = update.effective_user.id
         if not await self.check_subscription(update, context):
             await self.start(update, context)
             return
-
-        status = await update.message.reply_text("⚡️ Tahlil qilinmoqda...")
-
-        tmp_dir = tempfile.mkdtemp(dir=DOWNLOAD_DIR)
-        fpath = os.path.join(tmp_dir, f"{uuid.uuid4()}.mp4")
-
-        # Cookies faylini tekshirish
-        cookies_file = None
-        if os.path.exists(INSTAGRAM_COOKIES_FILE):
-            cookies_file = INSTAGRAM_COOKIES_FILE
-            logger.info(f"Instagram cookies fayli topildi: {cookies_file}")
-
+        status = await update.message.reply_text("⚡️ Tahlil...")
+        fpath = os.path.join(DOWNLOAD_DIR, f"{uuid.uuid4()}.mp4")
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[height<=720]',
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
             'outtmpl': fpath,
             'merge_output_format': 'mp4',
             'ffmpeg_location': FFMPEG_PATH,
             'quiet': True,
             'noplaylist': True,
-            'max_filesize': 50 * 1024 * 1024,
-            'socket_timeout': 180,
-            'retries': 5,
-            'fragment_retries': 5,
+            'max_filesize': 50*1024*1024,
+            'socket_timeout': 120,
         }
-        if cookies_file:
-            ydl_opts['cookiefile'] = cookies_file
-        else:
-            # Cookies bo'lmasa ham login talab qilmaslikka harakat qiladi
-            ydl_opts['extractor_args'] = {'instagram': {'no_login': True}}
-
         try:
-            await status.edit_text("⏳ Video yuklab olinmoqda...")
+            await status.edit_text("⏳ Yuklanmoqda...")
             loop = asyncio.get_running_loop()
-
-            def download_video():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-
-            await asyncio.wait_for(loop.run_in_executor(None, download_video), timeout=300)
-
-            downloaded_file = None
-            for f in os.listdir(tmp_dir):
-                if f.endswith(('.mp4', '.mkv', '.webm')):
-                    downloaded_file = os.path.join(tmp_dir, f)
-                    break
-
-            if downloaded_file and os.path.getsize(downloaded_file) > 0:
-                await status.edit_text("📤 Video yuborilmoqda...")
-                cap = f"🎬 Video yuklandi!\n\n{BOT_USERNAME}\n💾 {os.path.getsize(downloaded_file)/(1024*1024):.1f} MB"
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=open(downloaded_file, 'rb'),
-                    caption=cap,
-                    supports_streaming=True,
-                    parse_mode=ParseMode.HTML
-                )
+            def dl(): 
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([url])
+            await asyncio.wait_for(loop.run_in_executor(None, dl), timeout=180)
+            if os.path.exists(fpath) and os.path.getsize(fpath)>0:
+                await status.edit_text("📤 Yuborilmoqda...")
+                cap = f"🎬 Video yuklandi!\n\n{BOT_USERNAME}\n💾 {os.path.getsize(fpath)/(1024*1024):.1f} MB"
+                await context.bot.send_video(chat_id=update.effective_chat.id, video=open(fpath,'rb'), caption=cap, supports_streaming=True, parse_mode=ParseMode.HTML)
                 await status.delete()
             else:
-                await status.edit_text("❌ Video yuklab bo'lmadi. Havolani tekshiring yoki keyinroq urinib ko'ring.")
-        except asyncio.TimeoutError:
-            logger.error("Instagram yuklash: timeout")
-            await status.edit_text("❌ Yuklash vaqti tugadi. Video hajmi katta yoki server sekin.")
+                await status.edit_text("❌ Yuklab bo'lmadi.")
         except Exception as e:
-            logger.error(f"Instagram yuklashda xato: {e}")
-            err_msg = str(e)
-            if "login" in err_msg.lower() or "rate-limit" in err_msg.lower():
-                await status.edit_text("❌ Instagram vaqtinchalik cheklov qo'ygan. Iltimos, 10-15 daqiqadan so'ng qayta urinib ko'ring yoki cookies yangilang.")
-            else:
-                await status.edit_text("❌ Xatolik yuz berdi. Havolani tekshiring.")
+            logger.error(f"Download error: {e}")
+            await status.edit_text("❌ Xatolik.")
         finally:
-            try:
-                shutil.rmtree(tmp_dir)
-            except:
-                pass
+            if os.path.exists(fpath):
+                try: os.remove(fpath)
+                except: pass
 
     # ---------- ADMIN PANEL ----------
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -787,6 +701,7 @@ class InstagramDownloader:
             help_text = f"📚 {BOT_NAME}\n\nInstagram yuklash, AI rasm, Referat, Uzun matn, AI Studio."
             await query.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]), parse_mode=ParseMode.HTML)
 
+        # --- Admin tugmalari ---
         if user_id != ADMIN_ID: return
         try:
             if d == "admin_stat":
@@ -878,8 +793,4 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
 
     print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
-    if os.path.exists(INSTAGRAM_COOKIES_FILE):
-        print(f"✅ Instagram cookies fayli topildi: {INSTAGRAM_COOKIES_FILE}")
-    else:
-        print(f"⚠️ Instagram cookies fayli topilmadi: {INSTAGRAM_COOKIES_FILE} (video yuklash cheklangan bo'lishi mumkin)")
     app.run_polling(drop_pending_updates=True)
