@@ -13,7 +13,7 @@ from telegram.ext import (
     filters, ContextTypes, CallbackQueryHandler
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest   # ← Yangi qo‘shilgan
+from telegram.error import BadRequest
 
 # ====================== LOGGING ======================
 logging.basicConfig(
@@ -84,21 +84,46 @@ def admin_keyboard():
         [InlineKeyboardButton("📝 Reklama yuborish", callback_data="send_help")]
     ])
 
-# ====================== MAJBURIY OBUNA ======================
+# ====================== MAJBURIY OBUNA (ENG MUHIM TUZATILGAN QISM) ======================
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = get_settings()
     if settings['force_sub'] == 0:
         return True
+
     user_id = update.effective_user.id
     if user_id == ADMIN_ID:
         return True
+
     try:
         ch_id = settings['channel_id']
         member = await context.bot.get_chat_member(chat_id=ch_id, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
+        is_member = member.status in ['member', 'administrator', 'creator']
+        return is_member
+
     except Exception as e:
+        error_str = str(e).lower()
         logger.error(f"Obuna tekshirishda xato: {e}")
-        return True
+
+        # Bot kanalga Administrator bo'lmasa yoki boshqa muammo bo'lsa
+        if "member list is inaccessible" in error_str or "bad request" in error_str:
+            logger.error("⚠️ MAJBURIY OBUna ISHLAMAYAPTI! Bot kanalga Administrator emas yoki kanal topilmadi!")
+            
+            # Adminni bir marta ogohlantirish
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text="❗️ <b>MAJBURIY OBUna XATOSI!</b>\n\n"
+                         f"Bot {ch_id} kanalida to'g'ri Administrator emas.\n"
+                         "Iltimos, botni kanalga qayta Administrator qilib qo'shing.\n\n"
+                         "Hozircha majburiy obuna ishlamayapti.",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+            
+            return False   # ← Muhim! Endi "obuna bo'ling" xabari chiqadi
+
+        return False  # Boshqa xatolar uchun ham blok qilamiz
 
 # ====================== ASOSIY KLASS ======================
 class InstagramDownloader:
@@ -114,10 +139,12 @@ class InstagramDownloader:
             settings = get_settings()
             ch = settings['channel_id']
             link = f"https://t.me/{ch[1:]}" if ch.startswith('@') else f"https://t.me/{ch}"
+            
             keyboard = [
                 [InlineKeyboardButton("Kanalga a'zo bo'lish ✅", url=link)],
                 [InlineKeyboardButton("Tekshirish 🔄", callback_data="check_sub")]
             ]
+            
             await update.message.reply_text(
                 "👋 <b>Botdan foydalanish uchun kanalimizga a'zo bo'ling!</b>",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -272,6 +299,7 @@ class InstagramDownloader:
                 await self.start(update, context)
                 return
 
+            # ... (qolgan yuklash kodi o'zgarmadi) ...
             status_msg = await update.message.reply_text("⚡️ <b>Tahlil qilinmoqda...</b>", parse_mode=ParseMode.HTML)
             file_id = str(uuid.uuid4())
             file_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
@@ -328,5 +356,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(bot_logic.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_text))
 
-    print("🚀 Bot muvaffaqiyatli ishga tushdi! (Render uchun to'liq tuzatilgan)")
+    print("🚀 Bot muvaffaqiyatli ishga tushdi! (Majburiy obuna to'liq tuzatildi)")
     app.run_polling(drop_pending_updates=True)
