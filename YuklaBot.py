@@ -824,12 +824,15 @@ async def async_main():
     await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
+    # To'g'ridan-to'g'ri asyncio.run ishlatamiz.
+    # Agar muhitda event loop muammosi bo'lsa, qo'lda loop yaratamiz.
     try:
         asyncio.run(async_main())
     except RuntimeError as e:
         if "event loop" in str(e).lower():
-            # Boshqa event loop mavjud (masalan Railway'da)
-            loop = asyncio.get_event_loop()
+            # Yangi event loop yaratib, uni joriy qilamiz
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             loop.run_until_complete(async_main())
         else:
             raise
