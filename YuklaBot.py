@@ -23,7 +23,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TimedOut
 
-# OpenAI yangi SDK
 try:
     from openai import OpenAI
 except ImportError:
@@ -54,7 +53,6 @@ else:
     AI_ACTIVE = "pollinations"
     logger.warning("OpenAI API topilmadi. Pollinations (bepul) ishlatiladi.")
 
-# FFmpeg
 try:
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
@@ -113,7 +111,6 @@ async def init_db():
             style_name TEXT,
             unlock_cost_days INTEGER DEFAULT 7
         )""")
-        # Default sozlamalar
         cur = await db.execute("SELECT COUNT(*) FROM settings")
         if (await cur.fetchone())[0] == 0:
             await db.execute("INSERT INTO settings (id, channel_id, force_sub) VALUES (1, '', 1)")
@@ -129,7 +126,6 @@ async def init_db():
         await db.commit()
 
 # ====================== CACHE & UTILS ======================
-# RAM kesh (AI matn javoblari uchun)
 class TTLCache:
     def __init__(self, ttl: int = 3600):
         self.cache: Dict[str, tuple[str, float]] = {}
@@ -208,7 +204,6 @@ async def is_user_premium(user_id: int) -> bool:
             try:
                 expire = datetime.fromisoformat(row[1])
                 if expire < datetime.now():
-                    # Premium muddati tugagan – sinxron funksiyada yangilash
                     await asyncio.to_thread(_expire_premium_sync, user_id)
                     return False
             except:
@@ -217,7 +212,6 @@ async def is_user_premium(user_id: int) -> bool:
     return False
 
 def _expire_premium_sync(user_id: int):
-    """Thread-safe sinxron DB yangilash"""
     import sqlite3
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET is_premium=0 WHERE user_id=?", (user_id,))
@@ -275,7 +269,6 @@ async def ai_text(prompt: str, system: Optional[str] = None, use_cache: bool = T
             return cached
 
     result = None
-    # 1. OpenAI
     if openai_client:
         try:
             messages = []
@@ -293,7 +286,6 @@ async def ai_text(prompt: str, system: Optional[str] = None, use_cache: bool = T
         except Exception as e:
             logger.error(f"OpenAI text error: {e}")
 
-    # 2. Hugging Face (fallback 1)
     if not result and HUGGINGFACE_API_KEY:
         try:
             headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
@@ -307,7 +299,6 @@ async def ai_text(prompt: str, system: Optional[str] = None, use_cache: bool = T
         except Exception as e:
             logger.error(f"HuggingFace error: {e}")
 
-    # 3. Pollinations (fallback 2)
     if not result:
         try:
             full = f"{system}\n\n{prompt}" if system else prompt
@@ -326,7 +317,6 @@ async def ai_text(prompt: str, system: Optional[str] = None, use_cache: bool = T
     return result
 
 def ai_image(prompt: str) -> Optional[bytes]:
-    # 1. OpenAI DALL·E
     if openai_client:
         try:
             resp = openai_client.images.generate(prompt=prompt, n=1, size="1024x1024")
@@ -336,7 +326,6 @@ def ai_image(prompt: str) -> Optional[bytes]:
         except Exception as e:
             logger.error(f"OpenAI image error: {e}")
 
-    # 2. Pollinations
     try:
         url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
         resp = requests.get(url, timeout=120)
@@ -396,7 +385,6 @@ def add_watermark(image_bytes: bytes, text: str = BOT_USERNAME) -> bytes:
 # ====================== BOT KLASSI ======================
 class InstagramDownloader:
     def __init__(self):
-        # user_data TTL uchun
         self.user_data_ttl = {}
 
     async def check_subscription(self, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -419,12 +407,14 @@ class InstagramDownloader:
                 continue
         return True
 
-    # ---------- START ----------
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.callback_query:
             query = update.callback_query
             user = query.from_user
             message = query.message
+            if not message:
+                await query.answer("Xabar topilmadi.", show_alert=True)
+                return
             chat_id = message.chat.id
         else:
             user = update.effective_user
@@ -446,7 +436,6 @@ class InstagramDownloader:
             await db.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, joined_date, referrer_id) VALUES (?,?,?,?,?)",
                              (user_id, user.username, user.first_name, now, referrer_id))
             await db.commit()
-            # Yangi foydalanuvchi ekanligini tekshirish
             async with db.execute("SELECT changes() as c") as cur:
                 changes = (await cur.fetchone())[0]
             is_new = changes > 0
@@ -497,7 +486,6 @@ class InstagramDownloader:
         )
         self._clear_user_data(context)
 
-    # ---------- AI STUDIO ----------
     async def ai_studio_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = query.from_user.id
@@ -572,7 +560,6 @@ class InstagramDownloader:
         finally:
             self._clear_user_data(context)
 
-    # ---------- ODDIY RASM, REFERAT, UZUN MATN (qisqartirilgan, lekin to'liq) ----------
     async def generate_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
         user_id = update.effective_user.id
         if not await check_and_increment_usage(user_id):
@@ -611,7 +598,6 @@ class InstagramDownloader:
         await status.edit_text(f"📝 Kengaytirilgan matn:\n\n{result}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML)
         self._clear_user_data(context)
 
-    # ---------- INSTAGRAM YUKLASH ----------
     async def download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
         user_id = update.effective_user.id
         if not await self.check_subscription(user_id, context):
@@ -653,7 +639,6 @@ class InstagramDownloader:
                 except: pass
         self._clear_user_data(context)
 
-    # ---------- ADMIN PANEL ----------
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in ADMIN_IDS:
             await update.message.reply_text("⛔ Siz admin emassiz!")
@@ -684,7 +669,7 @@ class InstagramDownloader:
             try:
                 await context.bot.copy_message(u[0], update.effective_chat.id, update.message.reply_to_message.message_id)
                 sent += 1
-                await asyncio.sleep(0.1)   # Telegram rate limit
+                await asyncio.sleep(0.1)
             except Exception as e:
                 failed += 1
         await status.edit_text(f"✅ Yetkazildi: {sent}\n❌ Bloklagan: {failed}")
@@ -700,7 +685,6 @@ class InstagramDownloader:
             [InlineKeyboardButton("📢 Reklama yuborish", callback_data="send_help")]
         ])
 
-    # ---------- CALLBACK HANDLER (qisman) ----------
     async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = query.from_user.id
@@ -741,7 +725,6 @@ class InstagramDownloader:
         elif d == "help":
             help_text = f"📚 {BOT_NAME}\n\nInstagram yuklash, AI rasm, Referat, Uzun matn, AI Studio."
             await query.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]), parse_mode=ParseMode.HTML)
-        # Admin komandalari
         elif user_id in ADMIN_IDS:
             await self._admin_callback(update, context)
         else:
@@ -783,7 +766,6 @@ class InstagramDownloader:
             context.user_data['step'] = None
             await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb(settings))
 
-    # ---------- TEXT HANDLER ----------
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         text = update.message.text.strip()
@@ -823,10 +805,8 @@ class InstagramDownloader:
             await update.message.reply_text("Iltimos, menyudan tanlang yoki link yuboring.")
             self._clear_user_data(context)
 
-    # ---------- USER DATA TOZALASH ----------
     def _clear_user_data(self, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
-        # TTL ham tozalanadi (kerak emas)
 
     def _update_user_ttl(self, user_id: int):
         self.user_data_ttl[user_id] = time.time()
@@ -842,7 +822,20 @@ async def main():
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
     print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
+    # Muhim: Application.run_polling() event loopni o'zi boshqaradi
     await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Bu yerdan asyncio.run(main()) chaqirish o'rniga bevosita main() ni ishga tushiramiz,
+    # lekin Python skripti sinxron kontekstda bo'lgani uchun asyncio.run ishlatamiz.
+    # Bu safar xatolik bo'lmasligi kerak, chunki boshqa event loop mavjud emas.
+    # Agar Railway event loop muammosi yuz bersa, quyidagi kodni ishlatish kerak:
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "event loop" in str(e).lower():
+            # Boshqa event loop mavjud, shuning uchun mavjud loopni olamiz
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(main())
+        else:
+            raise
