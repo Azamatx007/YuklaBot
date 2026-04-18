@@ -44,7 +44,6 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
 DOWNLOAD_DIR = "downloads"
 BOT_NAME = "🌟 Zo'r Ekan Bot"
 
-# OpenAI mijoz
 openai_client = None
 if OPENAI_API_KEY and OpenAI:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -811,8 +810,8 @@ class InstagramDownloader:
     def _update_user_ttl(self, user_id: int):
         self.user_data_ttl[user_id] = time.time()
 
-# ====================== MAIN ======================
-async def main():
+# ====================== ASOSIY DASTUR (EVENT LOOP BILAN TO'G'RI ISHLOVCHI) ======================
+async def async_main():
     await init_db()
     bot = InstagramDownloader()
     app = ApplicationBuilder().token(TOKEN).build()
@@ -822,20 +821,15 @@ async def main():
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
     print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
-    # Muhim: Application.run_polling() event loopni o'zi boshqaradi
     await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    # Bu yerdan asyncio.run(main()) chaqirish o'rniga bevosita main() ni ishga tushiramiz,
-    # lekin Python skripti sinxron kontekstda bo'lgani uchun asyncio.run ishlatamiz.
-    # Bu safar xatolik bo'lmasligi kerak, chunki boshqa event loop mavjud emas.
-    # Agar Railway event loop muammosi yuz bersa, quyidagi kodni ishlatish kerak:
     try:
-        asyncio.run(main())
+        asyncio.run(async_main())
     except RuntimeError as e:
         if "event loop" in str(e).lower():
-            # Boshqa event loop mavjud, shuning uchun mavjud loopni olamiz
+            # Boshqa event loop mavjud (masalan Railway'da)
             loop = asyncio.get_event_loop()
-            loop.run_until_complete(main())
+            loop.run_until_complete(async_main())
         else:
             raise
