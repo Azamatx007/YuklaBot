@@ -60,11 +60,10 @@ except Exception:
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-# ====================== DATABASE (AIOSQLITE) ======================
+# ====================== DATABASE ======================
 DB_PATH = "users.db"
 
-async def init_db_async():
-    """Asinxron database initsializatsiyasi (agar kerak bo'lsa, bot ishga tushmasdan oldin sinxron qilamiz)"""
+async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -124,23 +123,6 @@ async def init_db_async():
             for t in templates:
                 await db.execute("INSERT INTO prompt_templates (name, category, system_prompt, user_prompt_template, is_premium) VALUES (?,?,?,?,?)", t)
         await db.commit()
-
-def init_db_sync():
-    """Sinxron wrapper: asinxron funksiyani event loopsiz ishga tushiradi"""
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Agar loop ishlayotgan bo'lsa, yangi task yaratamiz
-            asyncio.create_task(init_db_async())
-        else:
-            loop.run_until_complete(init_db_async())
-    except RuntimeError:
-        # Agar event loop mavjud bo'lmasa, yangi loop yaratamiz
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(init_db_async())
-        loop.close()
 
 # ====================== CACHE & UTILS ======================
 class TTLCache:
@@ -221,19 +203,17 @@ async def is_user_premium(user_id: int) -> bool:
             try:
                 expire = datetime.fromisoformat(row[1])
                 if expire < datetime.now():
-                    await asyncio.to_thread(_expire_premium_sync, user_id)
+                    await expire_premium(user_id)
                     return False
             except:
                 pass
         return True
     return False
 
-def _expire_premium_sync(user_id: int):
-    import sqlite3
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET is_premium=0 WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
+async def expire_premium(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET is_premium=0 WHERE user_id=?", (user_id,))
+        await db.commit()
 
 async def add_premium_days(user_id: int, days: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -828,27 +808,25 @@ class InstagramDownloader:
     def _update_user_ttl(self, user_id: int):
         self.user_data_ttl[user_id] = time.time()
 
-# ====================== ASOSIY DASTUR (TO'G'RILANGAN) ======================
+
+# ====================== TO'G'RI START KODI (ASINX EMAS, BLOKLANUVCHI) ======================
 def main():
-    # 1. Database initsializatsiyasi (sinxron tarzda)
-    init_db_sync()
+    # Avval ma'lumotlar bazasini sinxron tarzda ishga tushiramiz
+    asyncio.run(init_db())
 
-    # 2. Bot instansiyasi
     bot = InstagramDownloader()
-
-    # 3. Application yaratish
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # 4. Handlerlarni qo'shish
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("admin", bot.admin_panel))
     app.add_handler(CommandHandler("send", bot.broadcast_send))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
 
-    # 5. Botni ishga tushirish (bu bloklanuvchi funksiya, o'zi event loop yaratadi)
-    print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
+    print(f"🚀 {BOT_NAME} ishga tushdi!")
+    # Bu bloklanuvchi metod, hech qanday asyncio.run ichida emas
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
