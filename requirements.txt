@@ -1,10 +1,1 @@
-python-telegram-bot==20.7
-aiosqlite==0.20.0
-yt-dlp==2025.1.15
-imageio-ffmpeg==0.4.9
-requests==2.32.3
-Pillow==10.4.0
-python-dotenv==1.0.1
-openai==1.40.0
-beautifulsoup4==4.12.3
-lxml==5.2.2
+python-telegram-bot>=20.0 python-dotenv>=1.0.0 yt-dlp>=2023.12.30 imageio-ffmpeg>=0.4.9 requests>=2.31.0
