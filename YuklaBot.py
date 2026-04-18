@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "@zorekan_bot")
 ADMIN_ID = 6698039974
 DOWNLOAD_DIR = "downloads"
 BOT_NAME = "🌟 Zo'r Ekan Bot"
@@ -138,14 +139,12 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     for ch_id in channels:
         try:
-            clean_id = extract_channel_id(ch_id)  # har ehtimolga qarshi
+            clean_id = extract_channel_id(ch_id)
             member = await context.bot.get_chat_member(chat_id=clean_id, user_id=user_id)
             if member.status not in ['member', 'administrator', 'creator']:
                 return False
         except Exception as e:
             logger.warning(f"Kanal tekshirishda xato '{ch_id}': {e}")
-            # Agar kanal topilmasa yoki bot admin bo'lmasa, bu kanalni o'tkazib yuboramiz.
-            # Agar barcha kanallarni tekshirishni majburiy qilmoqchi bo'lsangiz, continue o'rniga return False
             continue
     return True
 
@@ -166,7 +165,6 @@ class InstagramDownloader:
             keyboard = []
 
             for ch in channels:
-                # Tugma uchun havolani tayyorlaymiz
                 if ch.startswith('@'):
                     link = f"https://t.me/{ch[1:]}"
                     btn_text = f"📢 {ch}"
@@ -222,12 +220,21 @@ class InstagramDownloader:
                     [InlineKeyboardButton("🏠 Bosh menyu", callback_data="start_menu")]
                 ]
 
+                # Caption faqat username bilan
+                caption = (
+                    f"✨ <b>Sun'iy intellekt yaratdi!</b>\n"
+                    f"📝 <i>{prompt}</i>\n\n"
+                    f"{BOT_USERNAME}\n"
+                    f"👉 Siz ham bepul foydalaning!"
+                )
+
                 with open(photo_file, 'rb') as photo:
                     await context.bot.send_photo(
                         chat_id=update.effective_chat.id,
                         photo=photo,
-                        caption=f"✅ {BOT_NAME} orqali yaratildi!\n\n📝 Tavsif: {prompt}",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
+                        caption=caption,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode=ParseMode.HTML
                     )
 
                 await status.delete()
@@ -282,14 +289,23 @@ class InstagramDownloader:
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 await status_msg.edit_text("📤 Video yuborilmoqda...")
 
+                # Caption faqat username bilan
+                caption = (
+                    f"🎬 <b>Video yuklab berildi!</b>\n"
+                    f"🔗 Manba: Instagram\n\n"
+                    f"{BOT_USERNAME}\n"
+                    f"💾 Hajmi: {os.path.getsize(file_path) / (1024*1024):.1f} MB"
+                )
+
                 await context.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=open(file_path, 'rb'),
-                    caption=f"✅ {BOT_NAME}\n🔗 {url.split('?')[0]}",
+                    caption=caption,
                     supports_streaming=True,
                     read_timeout=120,
                     write_timeout=120,
                     connect_timeout=30,
+                    parse_mode=ParseMode.HTML
                 )
                 await status_msg.delete()
             else:
@@ -332,7 +348,6 @@ class InstagramDownloader:
         except:
             pass
 
-        # Obuna tekshirish
         if query.data == "check_sub":
             if await check_subscription(update, context):
                 try:
@@ -347,7 +362,6 @@ class InstagramDownloader:
                     pass
             return
 
-        # Start menyu
         if query.data == "start_menu":
             try:
                 await query.message.delete()
@@ -356,13 +370,11 @@ class InstagramDownloader:
             await self.start(update, context)
             return
 
-        # Instagram yuklash
         if query.data == "instagram_info":
             context.user_data['step'] = 'waiting_for_instagram'
             await query.message.edit_text("📥 Instagram video linkini yuboring:")
             return
 
-        # Rasm yaratish
         if query.data == "generate_image":
             context.user_data['step'] = 'waiting_for_prompt'
             await query.message.edit_text(
@@ -383,7 +395,6 @@ class InstagramDownloader:
             )
             return
 
-        # Yordam
         if query.data == "help":
             help_text = (
                 f"📚 {BOT_NAME} - Yordam\n\n"
@@ -401,7 +412,6 @@ class InstagramDownloader:
             await query.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
             return
 
-        # Admin paneli (faqat admin uchun)
         if user_id != ADMIN_ID:
             return
 
@@ -535,7 +545,6 @@ class InstagramDownloader:
         text = update.message.text.strip()
         step = context.user_data.get('step')
 
-        # Admin - kanal qo'shish
         if user_id == ADMIN_ID and step == 'add_force_channel':
             if add_force_channel(text):
                 await update.message.reply_text(
@@ -551,7 +560,6 @@ class InstagramDownloader:
             context.user_data['step'] = None
             return
 
-        # Admin - kanal o'chirish
         if user_id == ADMIN_ID and step == 'remove_force_channel':
             remove_force_channel(text)
             await update.message.reply_text(
@@ -562,13 +570,11 @@ class InstagramDownloader:
             context.user_data['step'] = None
             return
 
-        # Rasm yaratish uchun prompt
         if step == 'waiting_for_prompt':
             context.user_data['step'] = None
             await self.generate_image(update, context, text)
             return
 
-        # Instagram linkini kutish
         if step == 'waiting_for_instagram':
             context.user_data['step'] = None
             if "instagram.com" in text.lower():
@@ -577,12 +583,10 @@ class InstagramDownloader:
                 await update.message.reply_text("❌ Iltimos, to'g'ri Instagram linkini yuboring!")
             return
 
-        # Instagram linki
         if "instagram.com" in text.lower():
             await self.download_instagram(update, context, text)
             return
 
-        # Boshqa xabarlar
         await update.message.reply_text(
             "❓ Iltimos, menyudan biror amalni tanlang yoki Instagram linkini yuboring."
         )
@@ -600,5 +604,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
 
     print(f"🚀 {BOT_NAME} muvaffaqiyatli ishga tushdi!")
-    print("✅ Instagram yuklash + AI rasm + Ko'p kanal obuna (tuzatilgan)")
+    print(f"✅ Instagram yuklash + AI rasm + Ko'p kanal obuna. Reklama: {BOT_USERNAME}")
     app.run_polling(drop_pending_updates=True)
