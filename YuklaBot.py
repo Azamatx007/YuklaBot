@@ -180,6 +180,7 @@ def is_user_premium(user_id: int) -> bool:
             try:
                 expire = datetime.fromisoformat(row['premium_expire'])
                 if expire < datetime.now():
+                    # Premium muddati tugagan – orqa planda yangilash
                     async def expire_premium():
                         async with db_lock:
                             c = get_db_connection()
@@ -380,45 +381,58 @@ class InstagramDownloader:
         return True
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Callback orqali chaqirilganda message ni tayyorlash
+        # Callback orqali kirganda message mavjud bo'lmasligi mumkin, shuning uchun tekshiramiz
         if update.callback_query:
             query = update.callback_query
             effective_user = query.from_user
+            chat_id = query.message.chat.id
             message = query.message
-            update.message = message
-            chat_id = message.chat.id
         else:
             effective_user = update.effective_user
-            message = update.message
             chat_id = update.effective_chat.id
+            message = update.message
 
         user = effective_user
         user_id = user.id
         args = context.args
         referrer_id = None
         if args:
-            try: referrer_id = int(args[0])
-            except: pass
+            try:
+                referrer_id = int(args[0])
+            except:
+                pass
 
         now = datetime.now().isoformat()
 
+        # Foydalanuvchini bazaga qo'shish / yangilash
         async with db_lock:
             conn = get_db_connection()
-            existing = conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
-            if not existing:
+            existing = conn.execute("SELECT user_id, referrer_id FROM users WHERE user_id=?", (user_id,)).fetchone()
+            is_new = not existing
+            if is_new:
                 conn.execute("""INSERT INTO users (user_id, username, first_name, joined_date, referrer_id)
                                 VALUES (?, ?, ?, ?, ?)""",
                              (user_id, user.username, user.first_name, now, referrer_id))
-                if referrer_id and referrer_id != user_id:
-                    await add_premium_days(referrer_id, 1)
-                    try:
-                        await context.bot.send_message(referrer_id, f"🎉 Sizning havolangiz orqali yangi foydalanuvchi qo'shildi! Sizga 1 kunlik premium taqdim etildi.")
-                    except: pass
+                conn.commit()
             else:
-                conn.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?", (user.username, user.first_name, user_id))
-            conn.commit()
+                # mavjud foydalanuvchi ma'lumotlarini yangilash
+                conn.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?",
+                             (user.username, user.first_name, user_id))
+                conn.commit()
             conn.close()
 
+        # Yangi foydalanuvchi va referrer mavjud bo'lsa, referrerga bonus berish
+        if is_new and referrer_id and referrer_id != user_id:
+            await add_premium_days(referrer_id, 1)
+            try:
+                await context.bot.send_message(
+                    referrer_id,
+                    f"🎉 Sizning havolangiz orqali yangi foydalanuvchi qo'shildi! Sizga 1 kunlik premium taqdim etildi."
+                )
+            except Exception as e:
+                logger.warning(f"Referrer {referrer_id} ga xabar yuborib bo'lmadi: {e}")
+
+        # Majburiy obuna tekshiruvi
         if not await self.check_subscription(update, context):
             channels = get_force_channels()
             text = "👋 <b>Botdan foydalanish uchun quyidagi kanallarga a'zo bo'ling:</b>\n\n"
