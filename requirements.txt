@@ -1,4 +1,5 @@
-python-telegram-bot
-yt-dlp
-python-dotenv
-imageio-ffmpeg
+python-telegram-bot>=20.0
+python-dotenv>=1.0.0
+yt-dlp>=2023.12.30
+imageio-ffmpeg>=0.4.9
+requests>=2.31.0
