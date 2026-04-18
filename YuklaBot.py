@@ -45,20 +45,10 @@ def get_db_connection():
 
 def init_db():
     conn = get_db_connection()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            status TEXT DEFAULT 'active'
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            id INTEGER PRIMARY KEY,
-            channel_id TEXT,
-            force_sub INTEGER DEFAULT 0
-        )
-    """)
+    conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT DEFAULT 'active')")
+    conn.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, channel_id TEXT, force_sub INTEGER DEFAULT 0)")
     
+    # Default qiymatni faqat birinchi marta qo'yamiz
     if conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0:
         conn.execute("INSERT INTO settings (id, channel_id, force_sub) VALUES (1, '@MafiaRoyale2', 0)")
     
@@ -84,7 +74,7 @@ def admin_keyboard():
         [InlineKeyboardButton("📝 Reklama yuborish", callback_data="send_help")]
     ])
 
-# ====================== MAJBURIY OBUNA (TO‘LIQ ISHLAYDIGAN) ======================
+# ====================== MAJBURIY OBUNA (100% ISHLAYDI) ======================
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = get_settings()
     if settings['force_sub'] == 0:
@@ -107,16 +97,17 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
-                text=f"❗️ <b>Majburiy obuna xatosi!</b>\n\n"
-                     f"Kanal: <code>{settings['channel_id']}</code>\n"
+                text=f"❗️ <b>MAJBURIY OBUna XATOSI!</b>\n\n"
+                     f"Kanal: <code>{settings.get('channel_id', 'NOMA\'LUM')}</code>\n"
                      f"Xato: {e}\n\n"
-                     "1. Botni kanalga Administrator qiling\n"
-                     "2. /admin → Kanalni o'zgartirish orqali yangi kanalni to'g'ri kiriting",
+                     "✅ Yechim:\n"
+                     "1. Botni YANGI kanalingizga Administrator qiling\n"
+                     "2. /admin → \"Kanalni o'zgartirish\" tugmasini bosing\n"
+                     "3. Yangi kanal username'ni yuboring (masalan: @YangiKanal2026)",
                 parse_mode=ParseMode.HTML
             )
         except:
             pass
-
         return False  # Xato bo'lsa ham obuna talab qilinadi
 
 # ====================== ASOSIY KLASS ======================
@@ -124,8 +115,6 @@ class InstagramDownloader:
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        
-        # Foydalanuvchini bazaga qo'shish
         conn = get_db_connection()
         conn.execute("INSERT OR REPLACE INTO users (user_id, status) VALUES (?, 'active')", (user_id,))
         conn.commit()
@@ -142,14 +131,14 @@ class InstagramDownloader:
             ]
             
             await update.message.reply_text(
-                "👋 <b>Botdan foydalanish uchun yangi kanalimizga a'zo bo'ling!</b>",
+                "👋 <b>Botdan foydalanish uchun YANGI kanalimizga a'zo bo'ling!</b>",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.HTML
             )
             return
 
         await update.message.reply_text(
-            "💎 <b>Xush kelibsiz!</b>\n\nInstagram video (Reel, Post, Story) linkini yuboring:",
+            "💎 <b>Xush kelibsiz!</b>\n\nInstagram video linkini yuboring:",
             parse_mode=ParseMode.HTML
         )
 
@@ -191,7 +180,6 @@ class InstagramDownloader:
                     reply_markup=admin_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
-
             elif query.data == "toggle_sub":
                 conn = get_db_connection()
                 conn.execute("UPDATE settings SET force_sub = 1 - force_sub WHERE id = 1")
@@ -203,21 +191,18 @@ class InstagramDownloader:
                     parse_mode=ParseMode.HTML
                 )
                 await query.answer("✅ Majburiy obuna holati o'zgartirildi!")
-
             elif query.data == "edit_channel":
                 context.user_data['step'] = 'change_ch'
                 await query.message.edit_text(
-                    "📝 Yangi kanal username'ni yuboring (masalan: @YangiKanalim):",
+                    "📝 Yangi kanal username'ni yuboring (masalan: @YangiKanal2026):",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Bekor qilish", callback_data="cancel")]])
                 )
-
             elif query.data == "send_help":
                 await query.message.edit_text(
-                    "🚀 Reklama yuborish uchun:\nXabarni yozing va unga reply qilib /send buyrug'ini bosing.",
+                    "🚀 Reklama yuborish uchun xabarni yozing va unga reply qilib /send buyrug'ini bosing.",
                     reply_markup=admin_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
-
             elif query.data == "cancel":
                 context.user_data['step'] = None
                 await query.message.edit_text(
@@ -225,14 +210,8 @@ class InstagramDownloader:
                     reply_markup=admin_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
-
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                await query.answer("✅ Yangilandi!")
-            else:
-                logger.error(f"Callback xatosi: {e}")
         except Exception as e:
-            logger.error(f"Callback kutilmagan xato: {e}")
+            logger.error(f"Callback xatosi: {e}")
 
     async def broadcast_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_ID:
@@ -269,7 +248,6 @@ class InstagramDownloader:
         text = update.message.text.strip()
         step = context.user_data.get('step')
 
-        # Kanal o'zgartirish
         if user_id == ADMIN_ID and step == 'change_ch':
             if text.startswith('@'):
                 conn = get_db_connection()
@@ -286,7 +264,6 @@ class InstagramDownloader:
                 await update.message.reply_text("❌ Xato! Kanal @ bilan boshlanishi kerak.")
             return
 
-        # Instagram yuklash
         if "instagram.com" in text:
             if not await check_subscription(update, context):
                 await self.start(update, context)
