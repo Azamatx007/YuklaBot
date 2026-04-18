@@ -113,7 +113,7 @@ class InstagramDownloader:
             )
             return
 
-        await update.message.reply_text("💎 <b>Tayyor!</b> Instagram linkini yuboring:")
+        await update.message.reply_text("💎 <b>Instagram Downloader tayyor!</b>\n\nVideo linkini yuboring:")
 
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_ID: return
