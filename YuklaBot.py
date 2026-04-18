@@ -13,6 +13,7 @@ from telegram.ext import (
     filters, ContextTypes, CallbackQueryHandler
 )
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -191,7 +192,7 @@ class InstagramDownloader:
         
         try:
             url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}"
-            response = requests.get(url, timeout=60)
+            response = requests.get(url, timeout=90)
             
             if response.status_code == 200:
                 photo_file = f"{DOWNLOAD_DIR}/generated_{uuid.uuid4()}.jpg"
@@ -242,6 +243,9 @@ class InstagramDownloader:
             'quiet': True,
             'noplaylist': True,
             'max_filesize': 50 * 1024 * 1024,
+            'socket_timeout': 120,          # Yangi: uzunroq timeout
+            'retries': 3,                   # Yangi: qayta urinish
+            'fragment_retries': 3,
         }
         
         try:
@@ -252,7 +256,11 @@ class InstagramDownloader:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
             
-            await loop.run_in_executor(None, download_video)
+            # Uzoqroq ishlash uchun timeout ni oshirish
+            await asyncio.wait_for(
+                loop.run_in_executor(None, download_video),
+                timeout=180  # 3 daqiqa
+            )
             
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 await status_msg.edit_text("📤 Video yuborilmoqda...")
@@ -261,12 +269,18 @@ class InstagramDownloader:
                     chat_id=update.effective_chat.id,
                     video=open(file_path, 'rb'),
                     caption=f"✅ {BOT_NAME}\n🔗 {url.split('?')[0]}",
-                    supports_streaming=True
+                    supports_streaming=True,
+                    read_timeout=120,
+                    write_timeout=120,
+                    connect_timeout=30,
                 )
                 await status_msg.delete()
             else:
                 await status_msg.edit_text("❌ Yuklab bo'lmadi.")
                 
+        except asyncio.TimeoutError:
+            logger.error("Yuklash jarayoni timeout bo'ldi")
+            await status_msg.edit_text("❌ Yuklash vaqti tugadi. Boshqa link sinab ko'ring.")
         except Exception as e:
             logger.error(f"Yuklashda xato: {e}")
             await status_msg.edit_text("❌ Xatolik yuz berdi. Link to'g'riligini tekshiring.")
@@ -298,7 +312,7 @@ class InstagramDownloader:
         
         try:
             await query.answer()
-        except Exception:
+        except:
             pass
         
         # Obuna tekshirish
@@ -342,7 +356,15 @@ class InstagramDownloader:
         
         if query.data == "new_image":
             context.user_data['step'] = 'waiting_for_prompt'
-            await query.message.edit_text("🖼 Yangi rasm uchun tavsif yozing:")
+            # Rasmli xabarni edit qilish o'rniga yangi xabar yuboramiz
+            try:
+                await query.message.delete()
+            except:
+                pass
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="🖼 Yangi rasm uchun tavsif yozing:"
+            )
             return
         
         # Yordam
@@ -441,6 +463,12 @@ class InstagramDownloader:
                     parse_mode=ParseMode.HTML
                 )
                 
+        except BadRequest as e:
+            logger.warning(f"BadRequest: {e}")
+            try:
+                await query.answer("Xatolik yuz berdi", show_alert=True)
+            except:
+                pass
         except Exception as e:
             logger.error(f"Callback xatosi: {e}")
             try:
