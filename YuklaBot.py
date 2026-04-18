@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import logging
@@ -7,9 +6,6 @@ import yt_dlp
 import uuid
 import imageio_ffmpeg
 import requests
-import time
-import hashlib
-from datetime import datetime, timedelta
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
@@ -21,11 +17,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
-try:
-    import openai
-except ImportError:
-    openai = None
-
 # ====================== LOGGING & ENV ======================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -36,18 +27,11 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "@zorekan_bot")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6698039974"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+ADMIN_ID = 6698039974
 DOWNLOAD_DIR = "downloads"
 BOT_NAME = "🌟 Zo'r Ekan Bot"
 
-if OPENAI_API_KEY and openai:
-    openai.api_key = OPENAI_API_KEY
-    AI_ACTIVE = "openai"
-else:
-    AI_ACTIVE = "pollinations"
-    logger.warning("OpenAI API key topilmadi. Pollinations (bepul) ishlatiladi.")
-
+# ====================== FFMPEG ======================
 try:
     FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 except Exception:
@@ -55,9 +39,6 @@ except Exception:
 
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
-
-# ====================== DATABASE LOCK ======================
-db_lock = asyncio.Lock()
 
 # ====================== DATABASE ======================
 def get_db_connection():
@@ -67,70 +48,34 @@ def get_db_connection():
 
 def init_db():
     conn = get_db_connection()
-    conn.execute("""CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        status TEXT DEFAULT 'active',
-        is_premium INTEGER DEFAULT 0,
-        premium_expire TEXT,
-        joined_date TEXT,
-        referrer_id INTEGER
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS settings (
-        id INTEGER PRIMARY KEY,
-        channel_id TEXT,
-        force_sub INTEGER DEFAULT 0
-    )""")
+    conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT DEFAULT 'active', is_premium INTEGER DEFAULT 0)")
+    conn.execute("CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, channel_id TEXT, force_sub INTEGER DEFAULT 0)")
     conn.execute("""CREATE TABLE IF NOT EXISTS force_channels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id TEXT UNIQUE NOT NULL
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS user_daily_usage (
-        user_id INTEGER,
-        date TEXT,
-        count INTEGER DEFAULT 0,
-        PRIMARY KEY (user_id, date)
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS ai_cache (
-        prompt_hash TEXT PRIMARY KEY,
-        response TEXT,
-        created INTEGER
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS prompt_templates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        category TEXT,
-        system_prompt TEXT,
-        user_prompt_template TEXT,
-        is_premium INTEGER DEFAULT 0
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS premium_styles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        style_key TEXT UNIQUE,
-        style_name TEXT,
-        unlock_cost_days INTEGER DEFAULT 7
-    )""")
-
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id TEXT UNIQUE NOT NULL)""")
     if conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0:
         conn.execute("INSERT INTO settings (id, channel_id, force_sub) VALUES (1, '', 1)")
-    if conn.execute("SELECT COUNT(*) FROM prompt_templates").fetchone()[0] == 0:
-        templates = [
-            ("Marketing Post", "business", "Siz professional marketologsiz. Berilgan mavzu bo'yicha ijodiy va sotuvchan post yozing.", "{topic}", 0),
-            ("Referat Rejasi", "academic", "Siz akademik yordamchisiz. Mavzu bo'yicha batafsil referat rejasini o'zbek tilida tuzing.", "Mavzu: {topic}", 0),
-            ("SEO Hashtaglar", "seo", "10 ta eng zo'r hashtaglarni qaytaring.", "Niche: {topic}", 0),
-        ]
-        for t in templates:
-            conn.execute("INSERT INTO prompt_templates (name, category, system_prompt, user_prompt_template, is_premium) VALUES (?,?,?,?,?)", t)
     conn.commit()
     conn.close()
 
 init_db()
 
-# ====================== YORDAMCHI FUNKSIYALAR ======================
+def get_settings():
+    conn = get_db_connection()
+    row = conn.execute("SELECT * FROM settings WHERE id = 1").fetchone()
+    conn.close()
+    return row
+
+def get_force_channels():
+    conn = get_db_connection()
+    rows = conn.execute("SELECT channel_id FROM force_channels").fetchall()
+    conn.close()
+    return [row['channel_id'] for row in rows]
+
 def extract_channel_id(raw: str) -> str:
     raw = raw.strip()
-    if raw.startswith('@'): return raw
+    if raw.startswith('@'):
+        return raw
     if 't.me/' in raw:
         parts = raw.split('t.me/')
         if len(parts) > 1:
@@ -138,182 +83,102 @@ def extract_channel_id(raw: str) -> str:
             return f"@{username}"
     return raw
 
-async def add_force_channel(channel_id: str):
+def add_force_channel(channel_id: str):
     channel_id = extract_channel_id(channel_id)
-    async with db_lock:
-        conn = get_db_connection()
-        try:
-            conn.execute("INSERT INTO force_channels (channel_id) VALUES (?)", (channel_id,))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-        finally:
-            conn.close()
-
-async def remove_force_channel(channel_id: str):
-    channel_id = extract_channel_id(channel_id)
-    async with db_lock:
-        conn = get_db_connection()
-        conn.execute("DELETE FROM force_channels WHERE channel_id = ?", (channel_id,))
+    conn = get_db_connection()
+    try:
+        conn.execute("INSERT INTO force_channels (channel_id) VALUES (?)", (channel_id,))
         conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
         conn.close()
 
-def get_force_channels():
+def remove_force_channel(channel_id: str):
+    channel_id = extract_channel_id(channel_id)
     conn = get_db_connection()
-    rows = conn.execute("SELECT channel_id FROM force_channels").fetchall()
+    conn.execute("DELETE FROM force_channels WHERE channel_id = ?", (channel_id,))
+    conn.commit()
     conn.close()
-    return [r['channel_id'] for r in rows]
-
-def get_settings():
-    conn = get_db_connection()
-    row = conn.execute("SELECT * FROM settings WHERE id=1").fetchone()
-    conn.close()
-    return row
 
 def is_user_premium(user_id: int) -> bool:
     conn = get_db_connection()
-    row = conn.execute("SELECT is_premium, premium_expire FROM users WHERE user_id=?", (user_id,)).fetchone()
+    row = conn.execute("SELECT is_premium FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
-    if not row: return False
-    if row['is_premium']:
-        if row['premium_expire']:
-            try:
-                expire = datetime.fromisoformat(row['premium_expire'])
-                if expire < datetime.now():
-                    # Premium muddati tugagan – orqa planda yangilash
-                    async def expire_premium():
-                        async with db_lock:
-                            c = get_db_connection()
-                            c.execute("UPDATE users SET is_premium=0 WHERE user_id=?", (user_id,))
-                            c.commit()
-                            c.close()
-                    asyncio.create_task(expire_premium())
-                    return False
-            except:
-                pass
+    return row and row['is_premium'] == 1
+
+# ====================== ADMIN KEYBOARD ======================
+def admin_keyboard():
+    settings = get_settings()
+    sub_status = "✅ YOQIQ" if settings['force_sub'] == 1 else "❌ O'CHIQ"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Statistika", callback_data="admin_stat")],
+        [InlineKeyboardButton(f"Majburiy obuna: {sub_status}", callback_data="toggle_sub")],
+        [InlineKeyboardButton("➕ Kanal qo'shish", callback_data="add_channel")],
+        [InlineKeyboardButton("➖ Kanal o'chirish", callback_data="remove_channel")],
+        [InlineKeyboardButton("📋 Kanallar ro'yxati", callback_data="list_channels")],
+        [InlineKeyboardButton("📢 Reklama yuborish", callback_data="send_help")]
+    ])
+
+# ====================== MAJBURIY OBUNA ======================
+async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    settings = get_settings()
+    if settings['force_sub'] == 0:
         return True
-    return False
-
-async def add_premium_days(user_id: int, days: int):
-    async with db_lock:
-        conn = get_db_connection()
-        row = conn.execute("SELECT premium_expire FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if row and row['premium_expire']:
-            try:
-                expire = datetime.fromisoformat(row['premium_expire'])
-            except:
-                expire = datetime.now()
-        else:
-            expire = datetime.now()
-        new_expire = max(expire, datetime.now()) + timedelta(days=days)
-        conn.execute("UPDATE users SET is_premium=1, premium_expire=? WHERE user_id=?", (new_expire.isoformat(), user_id))
-        conn.commit()
-        conn.close()
-
-async def check_and_increment_usage(user_id: int, limit_free: int = 3, limit_premium: int = 50) -> bool:
-    today = datetime.now().strftime("%Y-%m-%d")
-    async with db_lock:
-        conn = get_db_connection()
-        row = conn.execute("SELECT count FROM user_daily_usage WHERE user_id=? AND date=?", (user_id, today)).fetchone()
-        premium = is_user_premium(user_id)
-        limit = limit_premium if premium else limit_free
-        current = row['count'] if row else 0
-        if current >= limit:
-            conn.close()
-            return False
-        if row:
-            conn.execute("UPDATE user_daily_usage SET count=count+1 WHERE user_id=? AND date=?", (user_id, today))
-        else:
-            conn.execute("INSERT INTO user_daily_usage (user_id, date, count) VALUES (?,?,1)", (user_id, today))
-        conn.commit()
-        conn.close()
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.effective_user.id
+    if user_id == ADMIN_ID:
         return True
-
-def get_usage_info(user_id: int) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
-    conn = get_db_connection()
-    row = conn.execute("SELECT count FROM user_daily_usage WHERE user_id=? AND date=?", (user_id, today)).fetchone()
-    conn.close()
-    current = row['count'] if row else 0
-    premium = is_user_premium(user_id)
-    limit = 50 if premium else 3
-    return f"{current}/{limit}"
-
-# ====================== AI CACHE ======================
-cache_ttl = 3600
-
-def get_cached(prompt: str) -> str | None:
-    h = hashlib.md5(prompt.encode()).hexdigest()
-    conn = get_db_connection()
-    row = conn.execute("SELECT response, created FROM ai_cache WHERE prompt_hash=?", (h,)).fetchone()
-    conn.close()
-    if row:
-        if time.time() - row['created'] < cache_ttl:
-            return row['response']
-    return None
-
-async def set_cache(prompt: str, response: str):
-    h = hashlib.md5(prompt.encode()).hexdigest()
-    async with db_lock:
-        conn = get_db_connection()
-        conn.execute("INSERT OR REPLACE INTO ai_cache (prompt_hash, response, created) VALUES (?,?,?)", (h, response, int(time.time())))
-        conn.commit()
-        conn.close()
-
-# ====================== AI GENERATSIYA ======================
-async def ai_text(prompt: str, system: str = None, use_cache: bool = True) -> str:
-    cache_key = f"{system}||{prompt}" if system else prompt
-    if use_cache:
-        cached = get_cached(cache_key)
-        if cached: return cached
-
-    result = None
-    if AI_ACTIVE == "openai" and openai:
+    channels = get_force_channels()
+    if not channels:
+        return True
+    for ch_id in channels:
         try:
-            messages = []
-            if system: messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
-            resp = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages, temperature=0.7, max_tokens=1000)
-            result = resp.choices[0].message.content.strip()
+            clean_id = extract_channel_id(ch_id)
+            member = await context.bot.get_chat_member(chat_id=clean_id, user_id=user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
         except Exception as e:
-            logger.error(f"OpenAI text error: {e}")
+            logger.warning(f"Kanal tekshirishda xato '{ch_id}': {e}")
+            continue
+    return True
 
-    if not result:
+# ====================== AI YORDAMCHI FUNKSIYALAR ======================
+STYLES = {
+    "realistic": "realistic photography",
+    "anime": "anime style illustration",
+    "minimal": "minimalist design, clean and simple",
+    "business": "professional business poster style",
+    "meme": "funny meme style, viral internet culture",
+    "futuristic": "futuristic tech, neon lights, cyberpunk"
+}
+
+def generate_ai_text(prompt: str, system: str = None) -> str:
+    try:
         full = f"{system}\n\n{prompt}" if system else prompt
-        try:
-            url = f"https://text.pollinations.ai/{requests.utils.quote(full)}"
-            r = requests.get(url, timeout=60)
-            if r.status_code == 200:
-                result = r.text.strip()
-        except: pass
+        url = f"https://text.pollinations.ai/{requests.utils.quote(full)}"
+        resp = requests.get(url, timeout=60)
+        return resp.text.strip() if resp.status_code == 200 else None
+    except Exception as e:
+        logger.error(f"AI Text error: {e}")
+        return None
 
-    if not result:
-        result = "Xatolik yuz berdi. Iltimos, keyinroq urinib ko'ring."
+def generate_prompt_from_input(user_input: str) -> str:
+    system = "Siz professional AI prompt muhandisisiz. Qisqa tavsifdan marketing poster uchun ingliz tilida batafsil prompt yarating."
+    return generate_ai_text(f"Create an image prompt for: {user_input}", system) or user_input
 
-    if result and use_cache:
-        await set_cache(cache_key, result)
-    return result
-
-def ai_image(prompt: str) -> bytes | None:
-    if AI_ACTIVE == "openai" and openai:
-        try:
-            resp = openai.Image.create(prompt=prompt, n=1, size="1024x1024")
-            url = resp['data'][0]['url']
-            img_data = requests.get(url, timeout=30).content
-            return img_data
-        except Exception as e:
-            logger.error(f"OpenAI image error: {e}")
-
+def generate_image_from_prompt(prompt: str) -> bytes:
     try:
         url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
-        r = requests.get(url, timeout=120)
-        if r.status_code == 200:
-            return r.content
-    except: pass
-    return None
+        resp = requests.get(url, timeout=120)
+        return resp.content if resp.status_code == 200 else None
+    except Exception as e:
+        logger.error(f"Image gen error: {e}")
+        return None
 
-# ====================== RASMGA ISHLOV ======================
 def resize_image_smart(image_bytes: bytes, target_size: tuple) -> bytes:
     try:
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
@@ -330,9 +195,9 @@ def resize_image_smart(image_bytes: bytes, target_size: tuple) -> bytes:
             top = (oh - new_h) // 2
             img = img.crop((0, top, ow, top + new_h))
         img = img.resize((tw, th), Image.Resampling.LANCZOS)
-        out = BytesIO()
-        img.save(out, format='JPEG', quality=90)
-        return out.getvalue()
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=90)
+        return output.getvalue()
     except Exception as e:
         logger.error(f"Resize error: {e}")
         return image_bytes
@@ -340,8 +205,8 @@ def resize_image_smart(image_bytes: bytes, target_size: tuple) -> bytes:
 def add_watermark(image_bytes: bytes, text: str = BOT_USERNAME) -> bytes:
     try:
         img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-        txt = Image.new('RGBA', img.size, (255,255,255,0))
-        draw = ImageDraw.Draw(txt)
+        txt_layer = Image.new('RGBA', img.size, (255,255,255,0))
+        draw = ImageDraw.Draw(txt_layer)
         try:
             font = ImageFont.truetype("arial.ttf", size=int(img.width * 0.05))
         except:
@@ -351,7 +216,7 @@ def add_watermark(image_bytes: bytes, text: str = BOT_USERNAME) -> bytes:
         th = bbox[3] - bbox[1]
         pos = (img.width - tw - 20, img.height - th - 20)
         draw.text(pos, text, font=font, fill=(255,255,255,180))
-        combined = Image.alpha_composite(img, txt).convert("RGB")
+        combined = Image.alpha_composite(img, txt_layer).convert("RGB")
         out = BytesIO()
         combined.save(out, format='JPEG', quality=85)
         return out.getvalue()
@@ -362,109 +227,41 @@ def add_watermark(image_bytes: bytes, text: str = BOT_USERNAME) -> bytes:
 # ====================== BOT KLASSI ======================
 class InstagramDownloader:
 
-    async def check_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        settings = get_settings()
-        if settings['force_sub'] == 0: return True
-        if update.callback_query:
-            user_id = update.callback_query.from_user.id
-        else:
-            user_id = update.effective_user.id
-        if user_id == ADMIN_ID: return True
-        channels = get_force_channels()
-        if not channels: return True
-        for ch in channels:
-            try:
-                clean = extract_channel_id(ch)
-                member = await context.bot.get_chat_member(chat_id=clean, user_id=user_id)
-                if member.status not in ['member', 'administrator', 'creator']:
-                    return False
-            except: continue
-        return True
-
+    # ---------- START ----------
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Callback orqali kirganda message mavjud bo'lmasligi mumkin, shuning uchun tekshiramiz
-        if update.callback_query:
-            query = update.callback_query
-            effective_user = query.from_user
-            chat_id = query.message.chat.id
-            message = query.message
-        else:
-            effective_user = update.effective_user
-            chat_id = update.effective_chat.id
-            message = update.message
+        user_id = update.effective_user.id
+        conn = get_db_connection()
+        conn.execute("INSERT OR REPLACE INTO users (user_id, status) VALUES (?, 'active')", (user_id,))
+        conn.commit()
+        conn.close()
 
-        user = effective_user
-        user_id = user.id
-        args = context.args
-        referrer_id = None
-        if args:
-            try:
-                referrer_id = int(args[0])
-            except:
-                pass
-
-        now = datetime.now().isoformat()
-
-        # Foydalanuvchini bazaga qo'shish / yangilash
-        async with db_lock:
-            conn = get_db_connection()
-            existing = conn.execute("SELECT user_id, referrer_id FROM users WHERE user_id=?", (user_id,)).fetchone()
-            is_new = not existing
-            if is_new:
-                conn.execute("""INSERT INTO users (user_id, username, first_name, joined_date, referrer_id)
-                                VALUES (?, ?, ?, ?, ?)""",
-                             (user_id, user.username, user.first_name, now, referrer_id))
-                conn.commit()
-            else:
-                # mavjud foydalanuvchi ma'lumotlarini yangilash
-                conn.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?",
-                             (user.username, user.first_name, user_id))
-                conn.commit()
-            conn.close()
-
-        # Yangi foydalanuvchi va referrer mavjud bo'lsa, referrerga bonus berish
-        if is_new and referrer_id and referrer_id != user_id:
-            await add_premium_days(referrer_id, 1)
-            try:
-                await context.bot.send_message(
-                    referrer_id,
-                    f"🎉 Sizning havolangiz orqali yangi foydalanuvchi qo'shildi! Sizga 1 kunlik premium taqdim etildi."
-                )
-            except Exception as e:
-                logger.warning(f"Referrer {referrer_id} ga xabar yuborib bo'lmadi: {e}")
-
-        # Majburiy obuna tekshiruvi
-        if not await self.check_subscription(update, context):
+        if not await check_subscription(update, context):
             channels = get_force_channels()
             text = "👋 <b>Botdan foydalanish uchun quyidagi kanallarga a'zo bo'ling:</b>\n\n"
             keyboard = []
             for ch in channels:
                 if ch.startswith('@'):
                     link = f"https://t.me/{ch[1:]}"
-                    btn = f"📢 {ch}"
+                    btn_text = f"📢 {ch}"
                 else:
-                    link = ch
-                    btn = "📢 Kanal"
-                keyboard.append([InlineKeyboardButton(btn, url=link)])
+                    link = f"https://t.me/{ch}" if not ch.startswith('https') else ch
+                    btn_text = "📢 Kanalga o'tish"
+                keyboard.append([InlineKeyboardButton(btn_text, url=link)])
             keyboard.append([InlineKeyboardButton("✅ Tekshirish", callback_data="check_sub")])
-            await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
             return
 
-        ref_link = f"https://t.me/{context.bot.username}?start={user_id}"
         keyboard = [
-            [InlineKeyboardButton("📥 Instagram yuklash", callback_data="instagram_info")],
-            [InlineKeyboardButton("🎨 Rasm yaratish", callback_data="generate_image")],
-            [InlineKeyboardButton("📑 Referat", callback_data="referat")],
-            [InlineKeyboardButton("⚡️ Uzun matn", callback_data="long_text")],
+            [InlineKeyboardButton("📥 Instagramdan yuklash", callback_data="instagram_info")],
+            [InlineKeyboardButton("🎨 Rasm yaratish (AI)", callback_data="generate_image")],
+            [InlineKeyboardButton("📑 Referat tayyorlash", callback_data="referat")],
+            [InlineKeyboardButton("⚡️ Uzun matn yozish", callback_data="long_text")],
             [InlineKeyboardButton("🚀 AI Studio", callback_data="ai_studio")],
-            [InlineKeyboardButton("👥 Referral havola", callback_data="show_ref")],
-            [InlineKeyboardButton("📊 Mening limitim", callback_data="my_usage")],
             [InlineKeyboardButton("❓ Yordam", callback_data="help")]
         ]
-        await message.reply_text(
-            f"{BOT_NAME}\n\n💎 Xush kelibsiz, {user.first_name}!\n\n"
-            f"Sizning shaxsiy havolangiz:\n<code>{ref_link}</code>\n\n"
-            "Do'stlaringizni taklif qiling va premium kunlarni yig'ing!",
+        await update.message.reply_text(
+            f"{BOT_NAME}\n\n💎 <b>Xush kelibsiz!</b>\n\n"
+            "• Instagram yuklash\n• AI rasm\n• Referat\n• Uzun matn\n• AI Studio — marketing paket",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.HTML
         )
@@ -474,110 +271,127 @@ class InstagramDownloader:
         query = update.callback_query
         user_id = query.from_user.id
         context.user_data['ai_studio'] = {'premium': is_user_premium(user_id)}
-        style_buttons = [
-            [InlineKeyboardButton("🌟 Realistic", callback_data="style_realistic")],
-            [InlineKeyboardButton("🎌 Anime", callback_data="style_anime")],
-            [InlineKeyboardButton("📐 Minimal", callback_data="style_minimal")],
-            [InlineKeyboardButton("💼 Business Poster", callback_data="style_business")],
-            [InlineKeyboardButton("😂 Meme", callback_data="style_meme")],
-            [InlineKeyboardButton("🚀 Futuristic", callback_data="style_futuristic")],
-        ]
-        await query.message.edit_text("<b>🎨 AI Studio</b>\n\nUslubni tanlang:", reply_markup=InlineKeyboardMarkup(style_buttons), parse_mode=ParseMode.HTML)
+        styles_kb = [[InlineKeyboardButton(f"🌟 {v}", callback_data=f"style_{k}")] for k, v in STYLES.items()]
+        await query.message.edit_text(
+            "<b>🎨 AI Studio</b>\n\nQisqa matn yozing, to'liq marketing paket oling.\n\n<i>Uslubni tanlang:</i>",
+            reply_markup=InlineKeyboardMarkup(styles_kb),
+            parse_mode=ParseMode.HTML
+        )
 
     async def ai_studio_style_selected(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        data = query.data
-        style = data.replace("style_", "")
+        style = query.data.replace("style_", "")
         context.user_data['ai_studio']['style'] = style
-        await query.message.edit_text(f"✅ Uslub: {style}\nEndi qisqa matn yozing (masalan, 'Yangi kafe'):")
+        await query.message.edit_text(
+            f"✅ Uslub: <b>{STYLES[style]}</b>\n\nEndi qisqa matn yozing (masalan: 'Yangi coffee shop'):",
+            parse_mode=ParseMode.HTML
+        )
         context.user_data['step'] = 'waiting_for_ai_studio_input'
 
     async def process_ai_studio_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str):
         user_id = update.effective_user.id
-        if not await check_and_increment_usage(user_id):
-            await update.message.reply_text("❌ Kunlik AI limiti tugadi. Premium bo'ling yoki ertaga qayta urinib ko'ring.")
-            return
         status = await update.message.reply_text("🚀 AI Studio ishga tushdi...")
         data = context.user_data.get('ai_studio', {})
         style = data.get('style', 'realistic')
         is_prem = data.get('premium', False)
 
+        # 1. Prompt
         await status.edit_text("📝 Prompt yaratilmoqda...")
-        system = "Siz professional AI prompt muhandisisiz. Qisqa tavsifdan ingliz tilida batafsil tasviriy prompt yarating."
-        prompt_base = await ai_text(f"Create an image prompt for: {user_input}", system)
-        full_prompt = f"{prompt_base}, {style} style"
+        base = generate_prompt_from_input(user_input)
+        full_prompt = f"{base}, {STYLES[style]}"
 
+        # 2. Rasm
         await status.edit_text("🎨 Rasm chizilmoqda...")
-        img_bytes = ai_image(full_prompt)
+        img_bytes = generate_image_from_prompt(full_prompt)
         if not img_bytes:
             await status.edit_text("❌ Rasm yaratib bo'lmadi.")
             return
 
+        # 3. Formatlar
         await status.edit_text("🖼 Formatlarga o'tkazilmoqda...")
         formats = {"feed": (1024,1024), "story": (1080,1920), "banner": (1920,1080)}
-        media = []
+        media_group = []
         for name, size in formats.items():
             resized = resize_image_smart(img_bytes, size)
             if not is_prem:
                 resized = add_watermark(resized)
-            media.append(InputMediaPhoto(media=resized))
+            media_group.append(InputMediaPhoto(media=resized))
         if not is_prem:
-            media = [media[0]]
+            media_group = [media_group[0]]
 
-        await status.edit_text("✍️ Matnlar yozilmoqda...")
-        cap = await ai_text(f"Business: {user_input}", "3 xil caption yozing (business, emotional, short viral).")
-        tags = await ai_text(f"Niche: {user_input}", "10 ta eng yaxshi hashtag.")
+        # 4. Matnlar
+        await status.edit_text("✍️ Caption va hashtaglar...")
+        cap_prompt = f"Business: {user_input}"
+        cap_system = "3 xil caption yozing (business, emotional, short viral)."
+        caption = generate_ai_text(cap_prompt, cap_system) or "Ajoyib post!"
+        tag_prompt = f"Niche: {user_input}"
+        tag_system = "10 ta eng yaxshi hashtag (ingliz va o'zbek)."
+        hashtags = generate_ai_text(tag_prompt, tag_system) or "#ai #marketing"
 
         await status.delete()
         try:
-            if len(media) > 1:
-                await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
+            if len(media_group) > 1:
+                await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media_group)
             else:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=media[0].media)
-            final = f"<b>📦 Marketing paket</b>\n\n✍️ Caption:\n{cap}\n\n#️⃣ Hashtaglar:\n{tags}\n\n{BOT_USERNAME}"
-            await update.message.reply_text(final, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]))
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=media_group[0].media)
+            final_text = (
+                f"<b>📦 Marketing paket tayyor!</b>\n\n"
+                f"<b>✍️ Caption:</b>\n{caption}\n\n"
+                f"<b>#️⃣ Hashtaglar:</b>\n{hashtags}\n\n"
+                f"{'⚠️ Premium emas — 1 format + watermark.' if not is_prem else '✅ Premium — to\'liq paket!'}\n\n{BOT_USERNAME}"
+            )
+            await update.message.reply_text(final_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Bosh menyu", callback_data="start_menu")]]), parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"AI Studio send error: {e}")
+            await update.message.reply_text("❌ Natijani yuborishda xatolik.")
         context.user_data['step'] = None
-
-    # ---------- ODDIY RASM YARATISH ----------
-    async def generate_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
-        user_id = update.effective_user.id
-        if not await check_and_increment_usage(user_id):
-            await update.message.reply_text("❌ Kunlik limit tugadi.")
-            return
-        status = await update.message.reply_text("🎨 Rasm yaratilmoqda...")
-        img = ai_image(prompt)
-        if img:
-            path = f"{DOWNLOAD_DIR}/{uuid.uuid4()}.jpg"
-            with open(path, 'wb') as f: f.write(img)
-            cap = f"✨ AI rasm\n📝 {prompt}\n\n{BOT_USERNAME}"
-            with open(path, 'rb') as ph:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=ph, caption=cap, parse_mode=ParseMode.HTML)
-            os.remove(path)
-            await status.delete()
-        else:
-            await status.edit_text("❌ Xatolik.")
+        context.user_data.pop('ai_studio', None)
 
     # ---------- REFERAT & UZUN MATN ----------
     async def generate_referat(self, update: Update, context: ContextTypes.DEFAULT_TYPE, topic: str):
-        user_id = update.effective_user.id
-        if not await check_and_increment_usage(user_id): return
-        status = await update.message.reply_text("📑 Tayyorlanmoqda...")
-        result = await ai_text(f"Mavzu: {topic}", "Akademik referat rejasi tuzing. O'zbek tilida.")
-        await status.edit_text(f"📑 {topic}\n\n{result}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML)
+        status = await update.message.reply_text("📑 Referat tuzilmoqda...")
+        system = "Akademik referat rejasi (5-6 bo'lim, kirish, xulosa). O'zbek tilida."
+        prompt = f"Mavzu: {topic}"
+        result = generate_ai_text(prompt, system)
+        if result:
+            await status.edit_text(f"📑 <b>{topic}</b>\n\n{result}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]))
+        else:
+            await status.edit_text("❌ Xatolik.")
 
     async def generate_long_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE, short_text: str):
-        user_id = update.effective_user.id
-        if not await check_and_increment_usage(user_id): return
         status = await update.message.reply_text("⚡️ Matn kengaytirilmoqda...")
-        result = await ai_text(f"Qisqa matn: {short_text}", "Qisqa fikrni 200-300 so'zga kengaytir. O'zbek tilida.")
-        await status.edit_text(f"📝 Kengaytirilgan matn:\n\n{result}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML)
+        system = "Qisqa fikrni 200-300 so'zga kengaytir. O'zbek tilida."
+        prompt = f"Qisqa matn: {short_text}"
+        result = generate_ai_text(prompt, system)
+        if result:
+            await status.edit_text(f"📝 <b>Kengaytirilgan matn:</b>\n\n{result}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]))
+        else:
+            await status.edit_text("❌ Xatolik.")
+
+    # ---------- RASM YARATISH (oddiy) ----------
+    async def generate_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str):
+        status = await update.message.reply_text("🎨 Rasm yaratilmoqda...")
+        try:
+            url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(prompt)}"
+            resp = requests.get(url, timeout=90)
+            if resp.status_code == 200:
+                path = f"{DOWNLOAD_DIR}/gen_{uuid.uuid4()}.jpg"
+                with open(path, "wb") as f: f.write(resp.content)
+                caption = f"✨ <b>AI yaratdi!</b>\n📝 {prompt}\n\n{BOT_USERNAME}"
+                with open(path, 'rb') as ph:
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=ph, caption=caption, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Yana", callback_data="new_image")], [InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]))
+                await status.delete()
+                os.remove(path)
+            else:
+                await status.edit_text("❌ Rasm yaratib bo'lmadi.")
+        except Exception as e:
+            logger.error(f"Image error: {e}")
+            await status.edit_text("❌ Xatolik.")
 
     # ---------- INSTAGRAM YUKLASH ----------
     async def download_instagram(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
         user_id = update.effective_user.id
-        if not await self.check_subscription(update, context):
+        if not await check_subscription(update, context):
             await self.start(update, context)
             return
         status = await update.message.reply_text("⚡️ Tahlil...")
@@ -618,17 +432,7 @@ class InstagramDownloader:
         if update.effective_user.id != ADMIN_ID:
             await update.message.reply_text("⛔ Siz admin emassiz!")
             return
-        settings = get_settings()
-        sub_status = "✅ YOQIQ" if settings['force_sub'] == 1 else "❌ O'CHIQ"
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Statistika", callback_data="admin_stat")],
-            [InlineKeyboardButton(f"Majburiy obuna: {sub_status}", callback_data="toggle_sub")],
-            [InlineKeyboardButton("➕ Kanal qo'shish", callback_data="add_channel")],
-            [InlineKeyboardButton("➖ Kanal o'chirish", callback_data="remove_channel")],
-            [InlineKeyboardButton("📋 Kanallar ro'yxati", callback_data="list_channels")],
-            [InlineKeyboardButton("📢 Reklama yuborish", callback_data="send_help")]
-        ])
-        await update.message.reply_text("🕹 Admin paneli", reply_markup=kb, parse_mode=ParseMode.HTML)
+        await update.message.reply_text("🕹 <b>Admin paneli</b>", reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
 
     async def broadcast_send(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_ID: return
@@ -648,150 +452,162 @@ class InstagramDownloader:
             except: failed += 1
         await status.edit_text(f"✅ Yetkazildi: {sent}\n❌ Bloklagan: {failed}")
 
-    def _admin_kb(self):
-        settings = get_settings()
-        sub_status = "✅ YOQIQ" if settings['force_sub'] == 1 else "❌ O'CHIQ"
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Statistika", callback_data="admin_stat")],
-            [InlineKeyboardButton(f"Majburiy obuna: {sub_status}", callback_data="toggle_sub")],
-            [InlineKeyboardButton("➕ Kanal qo'shish", callback_data="add_channel")],
-            [InlineKeyboardButton("➖ Kanal o'chirish", callback_data="remove_channel")],
-            [InlineKeyboardButton("📋 Kanallar ro'yxati", callback_data="list_channels")],
-            [InlineKeyboardButton("📢 Reklama yuborish", callback_data="send_help")]
-        ])
-
-    # ---------- CALLBACK HANDLER ----------
+    # ---------- CALLBACK HANDLER (to'liq) ----------
     async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = query.from_user.id
-        await query.answer()
-        d = query.data
+        try: await query.answer()
+        except: pass
 
-        if d == "check_sub":
-            if await self.check_subscription(update, context):
-                await query.message.delete()
+        # --- umumiy tugmalar ---
+        if query.data == "check_sub":
+            if await check_subscription(update, context):
+                try: await query.message.delete()
+                except: pass
                 await self.start(update, context)
             else:
                 await query.answer("❌ Obuna bo'lmagansiz!", show_alert=True)
-        elif d == "start_menu":
-            await query.message.delete()
+            return
+        if query.data == "start_menu":
+            try: await query.message.delete()
+            except: pass
             await self.start(update, context)
-        elif d == "show_ref":
-            ref = f"https://t.me/{context.bot.username}?start={user_id}"
-            await query.message.reply_text(f"🔗 Havola:\n<code>{ref}</code>", parse_mode=ParseMode.HTML)
-        elif d == "my_usage":
-            info = get_usage_info(user_id)
-            await query.message.reply_text(f"📊 Bugungi AI foydalanish: {info}")
-        elif d == "instagram_info":
+            return
+        if query.data == "instagram_info":
             context.user_data['step'] = 'waiting_for_instagram'
             await query.message.edit_text("📥 Instagram linkini yuboring:")
-        elif d == "generate_image":
+            return
+        if query.data == "generate_image":
             context.user_data['step'] = 'waiting_for_prompt'
-            await query.message.edit_text("🖼 Tavsif yozing:")
-        elif d == "referat":
+            await query.message.edit_text("🖼 Rasm uchun tavsif yozing:")
+            return
+        if query.data == "new_image":
+            context.user_data['step'] = 'waiting_for_prompt'
+            try: await query.message.delete()
+            except: pass
+            await context.bot.send_message(user_id, "🖼 Yangi rasm uchun tavsif yozing:")
+            return
+        if query.data == "referat":
             context.user_data['step'] = 'waiting_for_referat_topic'
-            await query.message.edit_text("📑 Mavzu yozing:")
-        elif d == "long_text":
+            await query.message.edit_text("📑 Referat mavzusini yozing:")
+            return
+        if query.data == "long_text":
             context.user_data['step'] = 'waiting_for_long_text'
-            await query.message.edit_text("⚡️ Qisqa matn yozing:")
-        elif d == "ai_studio":
+            await query.message.edit_text("⚡️ Qisqa matn yozing, kengaytiraman:")
+            return
+        if query.data == "ai_studio":
             await self.ai_studio_start(update, context)
-        elif d.startswith("style_"):
+            return
+        if query.data.startswith("style_"):
             await self.ai_studio_style_selected(update, context)
-        elif d == "help":
+            return
+        if query.data == "help":
             help_text = f"📚 {BOT_NAME}\n\nInstagram yuklash, AI rasm, Referat, Uzun matn, AI Studio."
             await query.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menyu", callback_data="start_menu")]]), parse_mode=ParseMode.HTML)
+            return
 
-        # --- Admin tugmalari ---
+        # --- admin panel ---
         if user_id != ADMIN_ID: return
         try:
-            if d == "admin_stat":
+            if query.data == "admin_stat":
                 conn = get_db_connection()
-                cnt = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
                 conn.close()
-                await query.message.edit_text(f"📊 Foydalanuvchilar: {cnt}", reply_markup=self._admin_kb())
-            elif d == "toggle_sub":
-                async with db_lock:
-                    conn = get_db_connection()
-                    conn.execute("UPDATE settings SET force_sub = 1 - force_sub WHERE id=1")
-                    conn.commit()
-                    conn.close()
-                await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb())
-            elif d == "add_channel":
+                await query.message.edit_text(f"📊 Foydalanuvchilar: {count}", reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
+            elif query.data == "toggle_sub":
+                conn = get_db_connection()
+                conn.execute("UPDATE settings SET force_sub = 1 - force_sub WHERE id = 1")
+                conn.commit()
+                conn.close()
+                await query.message.edit_text("🕹 Admin paneli", reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
+                await query.answer("✅ O'zgartirildi!")
+            elif query.data == "add_channel":
                 context.user_data['step'] = 'add_force_channel'
                 await query.message.edit_text("➕ Kanal username yoki havolasini yuboring:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor", callback_data="cancel")]]))
-            elif d == "remove_channel":
+            elif query.data == "remove_channel":
                 context.user_data['step'] = 'remove_force_channel'
-                chs = get_force_channels()
-                txt = "➖ O'chirish uchun kanalni yuboring:\n\n" + "\n".join(chs) if chs else "Ro'yxat bo'sh."
+                channels = get_force_channels()
+                txt = "➖ O'chirish uchun kanalni yuboring:\n\n" + "\n".join(channels) if channels else "Ro'yxat bo'sh."
                 await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor", callback_data="cancel")]]))
-            elif d == "list_channels":
-                chs = get_force_channels()
-                txt = "📋 Kanallar:\n" + "\n".join(chs) if chs else "Ro'yxat bo'sh."
-                await query.message.edit_text(txt, reply_markup=self._admin_kb())
-            elif d == "send_help":
+            elif query.data == "list_channels":
+                channels = get_force_channels()
+                txt = "📋 Kanallar:\n" + "\n".join(channels) if channels else "Ro'yxat bo'sh."
+                await query.message.edit_text(txt, reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
+            elif query.data == "send_help":
                 await query.message.edit_text("📢 Reklama: xabarga reply qilib /send", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Orqaga", callback_data="admin_panel")]]))
-            elif d == "admin_panel":
-                await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb())
-            elif d == "cancel":
+            elif query.data == "admin_panel":
+                await query.message.edit_text("🕹 Admin paneli", reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
+            elif query.data == "cancel":
                 context.user_data['step'] = None
-                await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb())
+                await query.message.edit_text("🕹 Admin paneli", reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.error(f"Admin callback error: {e}")
 
-    # ---------- TEXT HANDLER ----------
+    # ---------- MATN XABARLARNI QAYTA ISHLASH ----------
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         text = update.message.text.strip()
         step = context.user_data.get('step')
 
+        # Admin kanal qo'shish/o'chirish
         if user_id == ADMIN_ID:
             if step == 'add_force_channel':
-                if await add_force_channel(text):
-                    await update.message.reply_text(f"✅ Qo'shildi: {extract_channel_id(text)}", reply_markup=self._admin_kb())
+                if add_force_channel(text):
+                    await update.message.reply_text(f"✅ Qo'shildi: {extract_channel_id(text)}", reply_markup=admin_keyboard())
                 else:
-                    await update.message.reply_text("⚠️ Mavjud.", reply_markup=self._admin_kb())
+                    await update.message.reply_text("⚠️ Mavjud.", reply_markup=admin_keyboard())
                 context.user_data['step'] = None
                 return
             if step == 'remove_force_channel':
-                await remove_force_channel(text)
-                await update.message.reply_text(f"✅ O'chirildi: {extract_channel_id(text)}", reply_markup=self._admin_kb())
+                remove_force_channel(text)
+                await update.message.reply_text(f"✅ O'chirildi: {extract_channel_id(text)}", reply_markup=admin_keyboard())
                 context.user_data['step'] = None
                 return
 
+        # AI Studio
         if step == 'waiting_for_ai_studio_input':
             context.user_data['step'] = None
             await self.process_ai_studio_input(update, context, text)
-        elif step == 'waiting_for_referat_topic':
+            return
+        # Referat
+        if step == 'waiting_for_referat_topic':
             context.user_data['step'] = None
             await self.generate_referat(update, context, text)
-        elif step == 'waiting_for_long_text':
+            return
+        # Uzun matn
+        if step == 'waiting_for_long_text':
             context.user_data['step'] = None
             await self.generate_long_text(update, context, text)
-        elif step == 'waiting_for_prompt':
+            return
+        # Rasm
+        if step == 'waiting_for_prompt':
             context.user_data['step'] = None
             await self.generate_image(update, context, text)
-        elif step == 'waiting_for_instagram':
+            return
+        # Instagram kutish
+        if step == 'waiting_for_instagram':
             context.user_data['step'] = None
             if "instagram.com" in text.lower():
                 await self.download_instagram(update, context, text)
             else:
                 await update.message.reply_text("❌ Instagram linki emas!")
-        elif "instagram.com" in text.lower():
+            return
+
+        # To'g'ridan-to'g'ri Instagram linki
+        if "instagram.com" in text.lower():
             await self.download_instagram(update, context, text)
-        else:
-            await update.message.reply_text("Iltimos, menyudan tanlang yoki link yuboring.")
+            return
+
+        await update.message.reply_text("Iltimos, menyudan tanlang yoki link yuboring.")
 
 # ====================== ASOSIY DASTUR ======================
 if __name__ == "__main__":
     bot = InstagramDownloader()
     app = ApplicationBuilder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("admin", bot.admin_panel))
     app.add_handler(CommandHandler("send", bot.broadcast_send))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
-
-    print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
+    print(f"🚀 {BOT_NAME} to'liq ishga tushdi!")
     app.run_polling(drop_pending_updates=True)
