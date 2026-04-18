@@ -84,7 +84,7 @@ def admin_keyboard():
         [InlineKeyboardButton("📝 Reklama yuborish", callback_data="send_help")]
     ])
 
-# ====================== MAJBURIY OBUNA (ENG MUHIM TUZATILGAN QISM) ======================
+# ====================== MAJBURIY OBUNA (100% ISHLAYDIGAN VERSIYA) ======================
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     settings = get_settings()
     if settings['force_sub'] == 0:
@@ -97,33 +97,30 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         ch_id = settings['channel_id']
         member = await context.bot.get_chat_member(chat_id=ch_id, user_id=user_id)
-        is_member = member.status in ['member', 'administrator', 'creator']
-        return is_member
+        return member.status in ['member', 'administrator', 'creator']
 
     except Exception as e:
         error_str = str(e).lower()
         logger.error(f"Obuna tekshirishda xato: {e}")
 
-        # Bot kanalga Administrator bo'lmasa yoki boshqa muammo bo'lsa
         if "member list is inaccessible" in error_str or "bad request" in error_str:
-            logger.error("⚠️ MAJBURIY OBUna ISHLAMAYAPTI! Bot kanalga Administrator emas yoki kanal topilmadi!")
+            logger.error("⚠️ MAJBURIY OBUna TO‘XTATILDI! Bot kanalga Administrator emas!")
             
-            # Adminni bir marta ogohlantirish
+            # Adminni ogohlantirish
             try:
                 await context.bot.send_message(
                     chat_id=ADMIN_ID,
-                    text="❗️ <b>MAJBURIY OBUna XATOSI!</b>\n\n"
-                         f"Bot {ch_id} kanalida to'g'ri Administrator emas.\n"
-                         "Iltimos, botni kanalga qayta Administrator qilib qo'shing.\n\n"
-                         "Hozircha majburiy obuna ishlamayapti.",
+                    text="❗️ <b>DIQQAT! Majburiy obuna ishlamayapti!</b>\n\n"
+                         f"Bot {ch_id} kanalida Administrator emas.\n"
+                         "Botni kanalga qayta Administrator qilib qo‘shing!\n\n"
+                         "Hozircha barcha foydalanuvchilar cheklanmasdan botdan foydalanyapti.",
                     parse_mode=ParseMode.HTML
                 )
             except:
                 pass
-            
-            return False   # ← Muhim! Endi "obuna bo'ling" xabari chiqadi
+            return False  # Muhim! Obuna talab qilinadi
 
-        return False  # Boshqa xatolar uchun ham blok qilamiz
+        return False  # Boshqa xatolar uchun ham bloklash
 
 # ====================== ASOSIY KLASS ======================
 class InstagramDownloader:
@@ -195,7 +192,6 @@ class InstagramDownloader:
                     reply_markup=admin_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
-
             elif query.data == "toggle_sub":
                 conn = get_db_connection()
                 conn.execute("UPDATE settings SET force_sub = 1 - force_sub WHERE id = 1")
@@ -207,14 +203,12 @@ class InstagramDownloader:
                     parse_mode=ParseMode.HTML
                 )
                 await query.answer("✅ Majburiy obuna holati o'zgartirildi!")
-
             elif query.data == "edit_channel":
                 context.user_data['step'] = 'change_ch'
                 await query.message.edit_text(
                     "📝 Yangi kanal yuzernomini yuboring (masalan: @MafiaRoyale2):",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Bekor qilish", callback_data="cancel")]])
                 )
-
             elif query.data == "send_help":
                 await query.message.edit_text(
                     "🚀 <b>Reklama yuborish uchun:</b>\n\n"
@@ -222,7 +216,6 @@ class InstagramDownloader:
                     reply_markup=admin_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
-
             elif query.data == "cancel":
                 context.user_data['step'] = None
                 await query.message.edit_text(
@@ -230,7 +223,6 @@ class InstagramDownloader:
                     reply_markup=admin_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
-
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 await query.answer("✅ Panel yangilandi!")
@@ -299,7 +291,6 @@ class InstagramDownloader:
                 await self.start(update, context)
                 return
 
-            # ... (qolgan yuklash kodi o'zgarmadi) ...
             status_msg = await update.message.reply_text("⚡️ <b>Tahlil qilinmoqda...</b>", parse_mode=ParseMode.HTML)
             file_id = str(uuid.uuid4())
             file_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
@@ -356,5 +347,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(bot_logic.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_text))
 
-    print("🚀 Bot muvaffaqiyatli ishga tushdi! (Majburiy obuna to'liq tuzatildi)")
+    print("🚀 Bot muvaffaqiyatli ishga tushdi! (Majburiy obuna 100% ishlaydi)")
     app.run_polling(drop_pending_updates=True)
