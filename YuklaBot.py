@@ -63,7 +63,8 @@ if not os.path.exists(DOWNLOAD_DIR):
 # ====================== DATABASE (AIOSQLITE) ======================
 DB_PATH = "users.db"
 
-async def init_db():
+async def init_db_async():
+    """Asinxron database initsializatsiyasi (agar kerak bo'lsa, bot ishga tushmasdan oldin sinxron qilamiz)"""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -123,6 +124,23 @@ async def init_db():
             for t in templates:
                 await db.execute("INSERT INTO prompt_templates (name, category, system_prompt, user_prompt_template, is_premium) VALUES (?,?,?,?,?)", t)
         await db.commit()
+
+def init_db_sync():
+    """Sinxron wrapper: asinxron funksiyani event loopsiz ishga tushiradi"""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Agar loop ishlayotgan bo'lsa, yangi task yaratamiz
+            asyncio.create_task(init_db_async())
+        else:
+            loop.run_until_complete(init_db_async())
+    except RuntimeError:
+        # Agar event loop mavjud bo'lmasa, yangi loop yaratamiz
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_db_async())
+        loop.close()
 
 # ====================== CACHE & UTILS ======================
 class TTLCache:
@@ -810,29 +828,27 @@ class InstagramDownloader:
     def _update_user_ttl(self, user_id: int):
         self.user_data_ttl[user_id] = time.time()
 
-# ====================== ASOSIY DASTUR (EVENT LOOP BILAN TO'G'RI ISHLOVCHI) ======================
-async def async_main():
-    await init_db()
+# ====================== ASOSIY DASTUR (TO'G'RILANGAN) ======================
+def main():
+    # 1. Database initsializatsiyasi (sinxron tarzda)
+    init_db_sync()
+
+    # 2. Bot instansiyasi
     bot = InstagramDownloader()
+
+    # 3. Application yaratish
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # 4. Handlerlarni qo'shish
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("admin", bot.admin_panel))
     app.add_handler(CommandHandler("send", bot.broadcast_send))
     app.add_handler(CallbackQueryHandler(bot.callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
+
+    # 5. Botni ishga tushirish (bu bloklanuvchi funksiya, o'zi event loop yaratadi)
     print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
-    await app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    # To'g'ridan-to'g'ri asyncio.run ishlatamiz.
-    # Agar muhitda event loop muammosi bo'lsa, qo'lda loop yaratamiz.
-    try:
-        asyncio.run(async_main())
-    except RuntimeError as e:
-        if "event loop" in str(e).lower():
-            # Yangi event loop yaratib, uni joriy qilamiz
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(async_main())
-        else:
-            raise
+    main()
