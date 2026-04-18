@@ -12,7 +12,6 @@ from telegram.ext import (
     filters, ContextTypes, CallbackQueryHandler
 )
 from telegram.constants import ParseMode
-from telegram.error import Forbidden, BadRequest
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -70,7 +69,8 @@ async def is_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         user_id = update.effective_user.id
-        # Kanal yuzernomini ID formatiga tekshirish
+        if user_id == ADMIN_ID: return True # Adminni tekshirmaslik
+
         ch_id = settings['channel_id']
         member = await context.bot.get_chat_member(chat_id=ch_id, user_id=user_id)
         return member.status not in ['left', 'kicked']
@@ -123,6 +123,8 @@ class InstagramDownloader:
     async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = query.from_user.id
+        
+        # Tugma bosilganda darrov "loading" holatini olib tashlash
         await query.answer()
 
         if query.data == "check_sub":
@@ -131,7 +133,9 @@ class InstagramDownloader:
                 await context.bot.send_message(user_id, "✅ Rahmat! Endi botdan foydalanishingiz mumkin.")
             else:
                 await query.answer("❌ Siz hali kanalga a'zo emassiz!", show_alert=True)
+            return
 
+        # Faqat admin uchun qolgan tugmalar
         if user_id != ADMIN_ID: return
 
         if query.data == "admin_stat":
@@ -153,7 +157,7 @@ class InstagramDownloader:
                                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Bekor qilish", callback_data="cancel")]]))
 
         elif query.data == "send_help":
-            await query.message.edit_text("🚀 <b>Reklama yuborish uchun:</b>\n\nXabarni yozing (rasm, video bo'lishi ham mumkin) va unga reply qilib <code>/send</code> buyrug'ini yuboring.", 
+            await query.message.edit_text("🚀 <b>Reklama yuborish uchun:</b>\n\nXabarni yozing va unga reply qilib <code>/send</code> buyrug'ini yuboring.", 
                                          reply_markup=admin_keyboard(), parse_mode=ParseMode.HTML)
 
         elif query.data == "cancel":
@@ -191,7 +195,7 @@ class InstagramDownloader:
         text = update.message.text
         step = context.user_data.get('step')
 
-        # Kanalni o'zgartirish
+        # Admin kanalni o'zgartirayotgan bo'lsa
         if user_id == ADMIN_ID and step == 'change_ch':
             conn = get_db_connection()
             conn.execute("UPDATE settings SET channel_id = ? WHERE id = 1", (text,))
@@ -201,7 +205,7 @@ class InstagramDownloader:
             await update.message.reply_text(f"✅ Kanal muvaffaqiyatli saqlandi: {text}", reply_markup=admin_keyboard())
             return
 
-        # Instagram yuklash
+        # Obunani tekshirish (faqat oddiy foydalanuvchilar va link yuborilganda)
         if "instagram.com" in text:
             if not await is_subscribed(update, context):
                 await self.start(update, context)
@@ -226,26 +230,31 @@ class InstagramDownloader:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = await loop.run_in_executor(None, lambda: ydl.extract_info(text, download=True))
                     downloaded_file = ydl.prepare_filename(info)
+                    
+                    # Agar fayl nomi o'zgarsa (mp4 ga merge bo'lsa)
                     if not os.path.exists(downloaded_file):
-                        downloaded_file = downloaded_file.rsplit('.', 1)[0] + ".mp4"
+                        ext = info.get('ext', 'mp4')
+                        downloaded_file = downloaded_file.rsplit('.', 1)[0] + "." + ext
 
                 await status_msg.edit_text("📤 <b>Yuborilmoqda...</b>", parse_mode=ParseMode.HTML)
                 with open(downloaded_file, 'rb') as video:
                     await context.bot.send_video(
-                        chat_id=update.effective_chat.id, video=video,
+                        chat_id=update.effective_chat.id, 
+                        video=video,
                         caption=f"🎬 <b>@GoYuklaBot orqali yuklandi</b>\n\n📥 {text.split('?')[0]}",
                         parse_mode=ParseMode.HTML
                     )
                 await status_msg.delete()
             except Exception as e:
                 logger.error(f"Download Error: {e}")
-                await status_msg.edit_text("❌ Xatolik yuz berdi. Link noto'g'ri bo'lishi mumkin.")
+                await status_msg.edit_text("❌ Xatolik yuz berdi. Link noto'g'ri yoki video yopiq.")
             finally:
-                for f in os.listdir(DOWNLOAD_DIR):
-                    if file_id in f:
-                        try: os.remove(os.path.join(DOWNLOAD_DIR, f))
-                        except: pass
+                # Faylni tozalash
+                if 'downloaded_file' in locals() and os.path.exists(downloaded_file):
+                    try: os.remove(downloaded_file)
+                    except: pass
         else:
+            # Agar oddiy matn bo'lsa va obuna bo'lmagan bo'lsa
             if not await is_subscribed(update, context):
                 await self.start(update, context)
 
@@ -256,8 +265,11 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler("start", bot_logic.start))
     app.add_handler(CommandHandler("admin", bot_logic.admin_panel))
-    app.add_handler(CommandHandler("send", bot_logic.broadcast_send)) # /send buyrug'i
+    app.add_handler(CommandHandler("send", bot_logic.broadcast_send))
+    
+    # CallbackQueryHandler ni to'g'ri bog'lash
     app.add_handler(CallbackQueryHandler(bot_logic.callback_handler))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_text))
 
     print("🚀 Bot ishga tushdi!")
