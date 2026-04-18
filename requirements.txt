@@ -1,4 +1,4 @@
-python-telegram-bot==21.10
+python-telegram-bot
 yt-dlp
 python-dotenv
 imageio-ffmpeg
