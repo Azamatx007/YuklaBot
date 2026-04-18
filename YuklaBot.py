@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 6698039974  
-CHANNEL_ID = "@MafiaRoyale2"  
+CHANNEL_ID = "3194764892"  
 DOWNLOAD_DIR = "downloads"
 INSTAGRAM_COOKIES = "instagram_cookies.txt"
 
