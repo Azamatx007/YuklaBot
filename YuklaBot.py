@@ -36,7 +36,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "6698039974"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL")
 DOWNLOAD_DIR = "downloads"
-BOT_NAME = "🌟 Zo'r Ekan Bot"
+BOT_NAME = "🌟 NeoGlow bot"
 
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
