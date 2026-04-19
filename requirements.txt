@@ -1,7 +1,8 @@
-python-telegram-bot>=20.0
-python-dotenv>=1.0.0
-yt-dlp>=2023.12.30
-imageio-ffmpeg>=0.4.9
-requests>=2.31.0
-Pillow>=10.0.0
-openai>=0.28.0
+python-telegram-bot==20.7
+yt-dlp==2024.10.22
+Pillow==10.4.0
+imageio-ffmpeg==0.5.1
+python-dotenv==1.0.1
+requests==2.32.3
+asyncpg==0.29.0
+openai==0.28.1  # OpenAI API ishlatilsa, kerak bo'ladi
