@@ -1,8 +1,6 @@
 import os
 import asyncio
 import logging
-import sqlite3
-import yt_dlp
 import uuid
 import imageio_ffmpeg
 import requests
@@ -19,6 +17,8 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
+import asyncpg
+import yt_dlp
 
 try:
     import openai
@@ -37,6 +37,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "@zorekan_bot")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6698039974"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL ulanish URL
 DOWNLOAD_DIR = "downloads"
 BOT_NAME = "🌟 Zo'r Ekan Bot"
 
@@ -55,76 +56,125 @@ except Exception:
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-# ====================== DATABASE LOCK ======================
-db_lock = asyncio.Lock()
+# ====================== DATABASE POOL ======================
+db_pool = None
 
-# ====================== DATABASE ======================
-def get_db_connection():
-    conn = sqlite3.connect("users.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+async def init_db_pool():
+    """PostgreSQL ulanishlar hovuzini yaratish."""
+    global db_pool
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=2,
+        max_size=10,
+        command_timeout=60
+    )
+    logger.info("PostgreSQL pool yaratildi")
 
-def init_db():
-    conn = get_db_connection()
-    conn.execute("""CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        status TEXT DEFAULT 'active',
-        is_premium INTEGER DEFAULT 0,
-        premium_expire TEXT,
-        joined_date TEXT,
-        referrer_id INTEGER
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS settings (
-        id INTEGER PRIMARY KEY,
-        channel_id TEXT,
-        force_sub INTEGER DEFAULT 0
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS force_channels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id TEXT UNIQUE NOT NULL
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS user_daily_usage (
-        user_id INTEGER,
-        date TEXT,
-        count INTEGER DEFAULT 0,
-        PRIMARY KEY (user_id, date)
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS ai_cache (
-        prompt_hash TEXT PRIMARY KEY,
-        response TEXT,
-        created INTEGER
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS prompt_templates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        category TEXT,
-        system_prompt TEXT,
-        user_prompt_template TEXT,
-        is_premium INTEGER DEFAULT 0
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS premium_styles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        style_key TEXT UNIQUE,
-        style_name TEXT,
-        unlock_cost_days INTEGER DEFAULT 7
-    )""")
+async def close_db_pool():
+    """Hovuzni yopish."""
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        logger.info("PostgreSQL pool yopildi")
 
-    if conn.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0:
-        conn.execute("INSERT INTO settings (id, channel_id, force_sub) VALUES (1, '', 1)")
-    if conn.execute("SELECT COUNT(*) FROM prompt_templates").fetchone()[0] == 0:
-        templates = [
-            ("Marketing Post", "business", "Siz professional marketologsiz. Berilgan mavzu bo'yicha ijodiy va sotuvchan post yozing.", "{topic}", 0),
-            ("Referat Rejasi", "academic", "Siz akademik yordamchisiz. Mavzu bo'yicha batafsil referat rejasini o'zbek tilida tuzing.", "Mavzu: {topic}", 0),
-            ("SEO Hashtaglar", "seo", "10 ta eng zo'r hashtaglarni qaytaring.", "Niche: {topic}", 0),
-        ]
-        for t in templates:
-            conn.execute("INSERT INTO prompt_templates (name, category, system_prompt, user_prompt_template, is_premium) VALUES (?,?,?,?,?)", t)
-    conn.commit()
-    conn.close()
+async def get_db():
+    """Hovuzdan ulanish olish."""
+    return await db_pool.acquire()
 
-init_db()
+async def release_db(conn):
+    """Ulanishni qaytarish."""
+    await db_pool.release(conn)
+
+# ====================== DATABASE INIT ======================
+async def init_db():
+    """PostgreSQL jadvallarini yaratish."""
+    conn = await get_db()
+    try:
+        # users jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                status TEXT DEFAULT 'active',
+                is_premium BOOLEAN DEFAULT FALSE,
+                premium_expire TIMESTAMP,
+                joined_date TIMESTAMP,
+                referrer_id BIGINT
+            )
+        """)
+        # settings jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY,
+                channel_id TEXT,
+                force_sub INTEGER DEFAULT 0
+            )
+        """)
+        # force_channels jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS force_channels (
+                id SERIAL PRIMARY KEY,
+                channel_id TEXT UNIQUE NOT NULL
+            )
+        """)
+        # user_daily_usage jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_daily_usage (
+                user_id BIGINT,
+                date TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, date)
+            )
+        """)
+        # ai_cache jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_cache (
+                prompt_hash TEXT PRIMARY KEY,
+                response TEXT,
+                created INTEGER
+            )
+        """)
+        # prompt_templates jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS prompt_templates (
+                id SERIAL PRIMARY KEY,
+                name TEXT,
+                category TEXT,
+                system_prompt TEXT,
+                user_prompt_template TEXT,
+                is_premium INTEGER DEFAULT 0
+            )
+        """)
+        # premium_styles jadvali
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS premium_styles (
+                id SERIAL PRIMARY KEY,
+                style_key TEXT UNIQUE,
+                style_name TEXT,
+                unlock_cost_days INTEGER DEFAULT 7
+            )
+        """)
+
+        # Boshlang'ich ma'lumotlarni kiritish
+        row = await conn.fetchrow("SELECT COUNT(*) FROM settings")
+        if row['count'] == 0:
+            await conn.execute("INSERT INTO settings (id, channel_id, force_sub) VALUES (1, '', 1)")
+
+        row = await conn.fetchrow("SELECT COUNT(*) FROM prompt_templates")
+        if row['count'] == 0:
+            templates = [
+                ("Marketing Post", "business", "Siz professional marketologsiz. Berilgan mavzu bo'yicha ijodiy va sotuvchan post yozing.", "{topic}", 0),
+                ("Referat Rejasi", "academic", "Siz akademik yordamchisiz. Mavzu bo'yicha batafsil referat rejasini o'zbek tilida tuzing.", "Mavzu: {topic}", 0),
+                ("SEO Hashtaglar", "seo", "10 ta eng zo'r hashtaglarni qaytaring.", "Niche: {topic}", 0),
+            ]
+            for t in templates:
+                await conn.execute(
+                    "INSERT INTO prompt_templates (name, category, system_prompt, user_prompt_template, is_premium) VALUES ($1,$2,$3,$4,$5)",
+                    *t
+                )
+    finally:
+        await release_db(conn)
 
 # ====================== YORDAMCHI FUNKSIYALAR ======================
 def extract_channel_id(raw: str) -> str:
@@ -139,132 +189,161 @@ def extract_channel_id(raw: str) -> str:
 
 async def add_force_channel(channel_id: str):
     channel_id = extract_channel_id(channel_id)
-    async with db_lock:
-        conn = get_db_connection()
-        try:
-            conn.execute("INSERT INTO force_channels (channel_id) VALUES (?)", (channel_id,))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-        finally:
-            conn.close()
+    conn = await get_db()
+    try:
+        await conn.execute(
+            "INSERT INTO force_channels (channel_id) VALUES ($1)",
+            channel_id
+        )
+        return True
+    except asyncpg.exceptions.UniqueViolationError:
+        return False
+    finally:
+        await release_db(conn)
 
 async def remove_force_channel(channel_id: str):
     channel_id = extract_channel_id(channel_id)
-    async with db_lock:
-        conn = get_db_connection()
-        conn.execute("DELETE FROM force_channels WHERE channel_id = ?", (channel_id,))
-        conn.commit()
-        conn.close()
+    conn = await get_db()
+    try:
+        await conn.execute("DELETE FROM force_channels WHERE channel_id = $1", channel_id)
+    finally:
+        await release_db(conn)
 
-def get_force_channels():
-    conn = get_db_connection()
-    rows = conn.execute("SELECT channel_id FROM force_channels").fetchall()
-    conn.close()
-    return [r['channel_id'] for r in rows]
+async def get_force_channels():
+    conn = await get_db()
+    try:
+        rows = await conn.fetch("SELECT channel_id FROM force_channels")
+        return [r['channel_id'] for r in rows]
+    finally:
+        await release_db(conn)
 
-def get_settings():
-    conn = get_db_connection()
-    row = conn.execute("SELECT * FROM settings WHERE id=1").fetchone()
-    conn.close()
-    return row
+async def get_settings():
+    conn = await get_db()
+    try:
+        row = await conn.fetchrow("SELECT * FROM settings WHERE id=1")
+        return row
+    finally:
+        await release_db(conn)
 
-def is_user_premium(user_id: int) -> bool:
-    conn = get_db_connection()
-    row = conn.execute("SELECT is_premium, premium_expire FROM users WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    if not row: return False
-    if row['is_premium']:
-        if row['premium_expire']:
-            try:
-                expire = datetime.fromisoformat(row['premium_expire'])
+async def is_user_premium(user_id: int) -> bool:
+    conn = await get_db()
+    try:
+        row = await conn.fetchrow(
+            "SELECT is_premium, premium_expire FROM users WHERE user_id=$1",
+            user_id
+        )
+        if not row: return False
+        if row['is_premium']:
+            if row['premium_expire']:
+                expire = row['premium_expire']
                 if expire < datetime.now():
                     # Premium muddati tugagan – orqa planda yangilash
                     async def expire_premium():
-                        async with db_lock:
-                            c = get_db_connection()
-                            c.execute("UPDATE users SET is_premium=0 WHERE user_id=?", (user_id,))
-                            c.commit()
-                            c.close()
+                        c = await get_db()
+                        try:
+                            await c.execute("UPDATE users SET is_premium=FALSE WHERE user_id=$1", user_id)
+                        finally:
+                            await release_db(c)
                     asyncio.create_task(expire_premium())
                     return False
-            except:
-                pass
-        return True
-    return False
+            return True
+        return False
+    finally:
+        await release_db(conn)
 
 async def add_premium_days(user_id: int, days: int):
-    async with db_lock:
-        conn = get_db_connection()
-        row = conn.execute("SELECT premium_expire FROM users WHERE user_id=?", (user_id,)).fetchone()
+    conn = await get_db()
+    try:
+        row = await conn.fetchrow("SELECT premium_expire FROM users WHERE user_id=$1", user_id)
         if row and row['premium_expire']:
-            try:
-                expire = datetime.fromisoformat(row['premium_expire'])
-            except:
-                expire = datetime.now()
+            expire = row['premium_expire']
         else:
             expire = datetime.now()
         new_expire = max(expire, datetime.now()) + timedelta(days=days)
-        conn.execute("UPDATE users SET is_premium=1, premium_expire=? WHERE user_id=?", (new_expire.isoformat(), user_id))
-        conn.commit()
-        conn.close()
+        await conn.execute(
+            "UPDATE users SET is_premium=TRUE, premium_expire=$1 WHERE user_id=$2",
+            new_expire, user_id
+        )
+    finally:
+        await release_db(conn)
 
 async def check_and_increment_usage(user_id: int, limit_free: int = 3, limit_premium: int = 50) -> bool:
     today = datetime.now().strftime("%Y-%m-%d")
-    async with db_lock:
-        conn = get_db_connection()
-        row = conn.execute("SELECT count FROM user_daily_usage WHERE user_id=? AND date=?", (user_id, today)).fetchone()
-        premium = is_user_premium(user_id)
+    conn = await get_db()
+    try:
+        row = await conn.fetchrow(
+            "SELECT count FROM user_daily_usage WHERE user_id=$1 AND date=$2",
+            user_id, today
+        )
+        premium = await is_user_premium(user_id)
         limit = limit_premium if premium else limit_free
         current = row['count'] if row else 0
         if current >= limit:
-            conn.close()
             return False
         if row:
-            conn.execute("UPDATE user_daily_usage SET count=count+1 WHERE user_id=? AND date=?", (user_id, today))
+            await conn.execute(
+                "UPDATE user_daily_usage SET count=count+1 WHERE user_id=$1 AND date=$2",
+                user_id, today
+            )
         else:
-            conn.execute("INSERT INTO user_daily_usage (user_id, date, count) VALUES (?,?,1)", (user_id, today))
-        conn.commit()
-        conn.close()
+            await conn.execute(
+                "INSERT INTO user_daily_usage (user_id, date, count) VALUES ($1,$2,1)",
+                user_id, today
+            )
         return True
+    finally:
+        await release_db(conn)
 
-def get_usage_info(user_id: int) -> str:
+async def get_usage_info(user_id: int) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
-    conn = get_db_connection()
-    row = conn.execute("SELECT count FROM user_daily_usage WHERE user_id=? AND date=?", (user_id, today)).fetchone()
-    conn.close()
-    current = row['count'] if row else 0
-    premium = is_user_premium(user_id)
-    limit = 50 if premium else 3
-    return f"{current}/{limit}"
+    conn = await get_db()
+    try:
+        row = await conn.fetchrow(
+            "SELECT count FROM user_daily_usage WHERE user_id=$1 AND date=$2",
+            user_id, today
+        )
+        current = row['count'] if row else 0
+        premium = await is_user_premium(user_id)
+        limit = 50 if premium else 3
+        return f"{current}/{limit}"
+    finally:
+        await release_db(conn)
 
 # ====================== AI CACHE ======================
 cache_ttl = 3600
 
-def get_cached(prompt: str) -> str | None:
+async def get_cached(prompt: str) -> str | None:
     h = hashlib.md5(prompt.encode()).hexdigest()
-    conn = get_db_connection()
-    row = conn.execute("SELECT response, created FROM ai_cache WHERE prompt_hash=?", (h,)).fetchone()
-    conn.close()
-    if row:
-        if time.time() - row['created'] < cache_ttl:
-            return row['response']
-    return None
+    conn = await get_db()
+    try:
+        row = await conn.fetchrow(
+            "SELECT response, created FROM ai_cache WHERE prompt_hash=$1",
+            h
+        )
+        if row:
+            if time.time() - row['created'] < cache_ttl:
+                return row['response']
+        return None
+    finally:
+        await release_db(conn)
 
 async def set_cache(prompt: str, response: str):
     h = hashlib.md5(prompt.encode()).hexdigest()
-    async with db_lock:
-        conn = get_db_connection()
-        conn.execute("INSERT OR REPLACE INTO ai_cache (prompt_hash, response, created) VALUES (?,?,?)", (h, response, int(time.time())))
-        conn.commit()
-        conn.close()
+    conn = await get_db()
+    try:
+        await conn.execute(
+            "INSERT INTO ai_cache (prompt_hash, response, created) VALUES ($1,$2,$3) "
+            "ON CONFLICT (prompt_hash) DO UPDATE SET response=EXCLUDED.response, created=EXCLUDED.created",
+            h, response, int(time.time())
+        )
+    finally:
+        await release_db(conn)
 
 # ====================== AI GENERATSIYA ======================
 async def ai_text(prompt: str, system: str = None, use_cache: bool = True) -> str:
     cache_key = f"{system}||{prompt}" if system else prompt
     if use_cache:
-        cached = get_cached(cache_key)
+        cached = await get_cached(cache_key)
         if cached: return cached
 
     result = None
@@ -362,14 +441,14 @@ def add_watermark(image_bytes: bytes, text: str = BOT_USERNAME) -> bytes:
 class InstagramDownloader:
 
     async def check_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-        settings = get_settings()
+        settings = await get_settings()
         if settings['force_sub'] == 0: return True
         if update.callback_query:
             user_id = update.callback_query.from_user.id
         else:
             user_id = update.effective_user.id
         if user_id == ADMIN_ID: return True
-        channels = get_force_channels()
+        channels = await get_force_channels()
         if not channels: return True
         for ch in channels:
             try:
@@ -381,7 +460,6 @@ class InstagramDownloader:
         return True
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Callback orqali kirganda message mavjud bo'lmasligi mumkin, shuning uchun tekshiramiz
         if update.callback_query:
             query = update.callback_query
             effective_user = query.from_user
@@ -402,24 +480,25 @@ class InstagramDownloader:
             except:
                 pass
 
-        now = datetime.now().isoformat()
+        now = datetime.now()
 
         # Foydalanuvchini bazaga qo'shish / yangilash
-        async with db_lock:
-            conn = get_db_connection()
-            existing = conn.execute("SELECT user_id, referrer_id FROM users WHERE user_id=?", (user_id,)).fetchone()
+        conn = await get_db()
+        try:
+            existing = await conn.fetchrow("SELECT user_id, referrer_id FROM users WHERE user_id=$1", user_id)
             is_new = not existing
             if is_new:
-                conn.execute("""INSERT INTO users (user_id, username, first_name, joined_date, referrer_id)
-                                VALUES (?, ?, ?, ?, ?)""",
-                             (user_id, user.username, user.first_name, now, referrer_id))
-                conn.commit()
+                await conn.execute("""
+                    INSERT INTO users (user_id, username, first_name, joined_date, referrer_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, user_id, user.username, user.first_name, now, referrer_id)
             else:
-                # mavjud foydalanuvchi ma'lumotlarini yangilash
-                conn.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?",
-                             (user.username, user.first_name, user_id))
-                conn.commit()
-            conn.close()
+                await conn.execute(
+                    "UPDATE users SET username=$1, first_name=$2 WHERE user_id=$3",
+                    user.username, user.first_name, user_id
+                )
+        finally:
+            await release_db(conn)
 
         # Yangi foydalanuvchi va referrer mavjud bo'lsa, referrerga bonus berish
         if is_new and referrer_id and referrer_id != user_id:
@@ -434,7 +513,7 @@ class InstagramDownloader:
 
         # Majburiy obuna tekshiruvi
         if not await self.check_subscription(update, context):
-            channels = get_force_channels()
+            channels = await get_force_channels()
             text = "👋 <b>Botdan foydalanish uchun quyidagi kanallarga a'zo bo'ling:</b>\n\n"
             keyboard = []
             for ch in channels:
@@ -472,7 +551,7 @@ class InstagramDownloader:
     async def ai_studio_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         user_id = query.from_user.id
-        context.user_data['ai_studio'] = {'premium': is_user_premium(user_id)}
+        context.user_data['ai_studio'] = {'premium': await is_user_premium(user_id)}
         style_buttons = [
             [InlineKeyboardButton("🌟 Realistic", callback_data="style_realistic")],
             [InlineKeyboardButton("🎌 Anime", callback_data="style_anime")],
@@ -617,7 +696,7 @@ class InstagramDownloader:
         if update.effective_user.id != ADMIN_ID:
             await update.message.reply_text("⛔ Siz admin emassiz!")
             return
-        settings = get_settings()
+        settings = await get_settings()
         sub_status = "✅ YOQIQ" if settings['force_sub'] == 1 else "❌ O'CHIQ"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Statistika", callback_data="admin_stat")],
@@ -635,9 +714,11 @@ class InstagramDownloader:
             await update.message.reply_text("Reply qiling.")
             return
         status = await update.message.reply_text("📢 Yuborilmoqda...")
-        conn = get_db_connection()
-        users = conn.execute("SELECT user_id FROM users").fetchall()
-        conn.close()
+        conn = await get_db()
+        try:
+            users = await conn.fetch("SELECT user_id FROM users")
+        finally:
+            await release_db(conn)
         sent = failed = 0
         for u in users:
             try:
@@ -647,8 +728,8 @@ class InstagramDownloader:
             except: failed += 1
         await status.edit_text(f"✅ Yetkazildi: {sent}\n❌ Bloklagan: {failed}")
 
-    def _admin_kb(self):
-        settings = get_settings()
+    async def _admin_kb(self):
+        settings = await get_settings()
         sub_status = "✅ YOQIQ" if settings['force_sub'] == 1 else "❌ O'CHIQ"
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Statistika", callback_data="admin_stat")],
@@ -679,7 +760,7 @@ class InstagramDownloader:
             ref = f"https://t.me/{context.bot.username}?start={user_id}"
             await query.message.reply_text(f"🔗 Havola:\n<code>{ref}</code>", parse_mode=ParseMode.HTML)
         elif d == "my_usage":
-            info = get_usage_info(user_id)
+            info = await get_usage_info(user_id)
             await query.message.reply_text(f"📊 Bugungi AI foydalanish: {info}")
         elif d == "instagram_info":
             context.user_data['step'] = 'waiting_for_instagram'
@@ -705,36 +786,43 @@ class InstagramDownloader:
         if user_id != ADMIN_ID: return
         try:
             if d == "admin_stat":
-                conn = get_db_connection()
-                cnt = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-                conn.close()
-                await query.message.edit_text(f"📊 Foydalanuvchilar: {cnt}", reply_markup=self._admin_kb())
+                conn = await get_db()
+                try:
+                    cnt = await conn.fetchval("SELECT COUNT(*) FROM users")
+                finally:
+                    await release_db(conn)
+                kb = await self._admin_kb()
+                await query.message.edit_text(f"📊 Foydalanuvchilar: {cnt}", reply_markup=kb)
             elif d == "toggle_sub":
-                async with db_lock:
-                    conn = get_db_connection()
-                    conn.execute("UPDATE settings SET force_sub = 1 - force_sub WHERE id=1")
-                    conn.commit()
-                    conn.close()
-                await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb())
+                conn = await get_db()
+                try:
+                    await conn.execute("UPDATE settings SET force_sub = 1 - force_sub WHERE id=1")
+                finally:
+                    await release_db(conn)
+                kb = await self._admin_kb()
+                await query.message.edit_text("🕹 Admin paneli", reply_markup=kb)
             elif d == "add_channel":
                 context.user_data['step'] = 'add_force_channel'
                 await query.message.edit_text("➕ Kanal username yoki havolasini yuboring:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor", callback_data="cancel")]]))
             elif d == "remove_channel":
                 context.user_data['step'] = 'remove_force_channel'
-                chs = get_force_channels()
+                chs = await get_force_channels()
                 txt = "➖ O'chirish uchun kanalni yuboring:\n\n" + "\n".join(chs) if chs else "Ro'yxat bo'sh."
                 await query.message.edit_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Bekor", callback_data="cancel")]]))
             elif d == "list_channels":
-                chs = get_force_channels()
+                chs = await get_force_channels()
                 txt = "📋 Kanallar:\n" + "\n".join(chs) if chs else "Ro'yxat bo'sh."
-                await query.message.edit_text(txt, reply_markup=self._admin_kb())
+                kb = await self._admin_kb()
+                await query.message.edit_text(txt, reply_markup=kb)
             elif d == "send_help":
                 await query.message.edit_text("📢 Reklama: xabarga reply qilib /send", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Orqaga", callback_data="admin_panel")]]))
             elif d == "admin_panel":
-                await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb())
+                kb = await self._admin_kb()
+                await query.message.edit_text("🕹 Admin paneli", reply_markup=kb)
             elif d == "cancel":
                 context.user_data['step'] = None
-                await query.message.edit_text("🕹 Admin paneli", reply_markup=self._admin_kb())
+                kb = await self._admin_kb()
+                await query.message.edit_text("🕹 Admin paneli", reply_markup=kb)
         except Exception as e:
             logger.error(f"Admin callback error: {e}")
 
@@ -747,14 +835,17 @@ class InstagramDownloader:
         if user_id == ADMIN_ID:
             if step == 'add_force_channel':
                 if await add_force_channel(text):
-                    await update.message.reply_text(f"✅ Qo'shildi: {extract_channel_id(text)}", reply_markup=self._admin_kb())
+                    kb = await self._admin_kb()
+                    await update.message.reply_text(f"✅ Qo'shildi: {extract_channel_id(text)}", reply_markup=kb)
                 else:
-                    await update.message.reply_text("⚠️ Mavjud.", reply_markup=self._admin_kb())
+                    kb = await self._admin_kb()
+                    await update.message.reply_text("⚠️ Mavjud.", reply_markup=kb)
                 context.user_data['step'] = None
                 return
             if step == 'remove_force_channel':
                 await remove_force_channel(text)
-                await update.message.reply_text(f"✅ O'chirildi: {extract_channel_id(text)}", reply_markup=self._admin_kb())
+                kb = await self._admin_kb()
+                await update.message.reply_text(f"✅ O'chirildi: {extract_channel_id(text)}", reply_markup=kb)
                 context.user_data['step'] = None
                 return
 
@@ -782,7 +873,10 @@ class InstagramDownloader:
             await update.message.reply_text("Iltimos, menyudan tanlang yoki link yuboring.")
 
 # ====================== ASOSIY DASTUR ======================
-if __name__ == "__main__":
+async def main():
+    await init_db_pool()
+    await init_db()
+
     bot = InstagramDownloader()
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -793,4 +887,12 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_text))
 
     print(f"🚀 {BOT_NAME} to'liq professional rejimda ishga tushdi!")
-    app.run_polling(drop_pending_updates=True)
+    await app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot to'xtatildi")
+    finally:
+        asyncio.run(close_db_pool())
