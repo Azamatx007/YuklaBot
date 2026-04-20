@@ -1115,4 +1115,4 @@ def main():
         except:
             pass
 if __name__ == "__main__":
-    main() kod toliq togri yozilganmi kamchiliklari yoqmi
+    main()
